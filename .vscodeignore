@@ -3,6 +3,8 @@
 .github/**
 esbuild.mjs
 scripts/**
+docs/**
+examples/**
 src/**
 test/**
 tsconfig.json

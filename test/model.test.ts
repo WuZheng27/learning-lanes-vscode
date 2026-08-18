@@ -90,7 +90,7 @@ describe("learning model", () => {
       },
       "file:///workspace",
     );
-    expect(normalized.schemaVersion).toBe(7);
+    expect(normalized.schemaVersion).toBe(8);
     expect(normalized.rootThreadId).toBe("root-thread");
     expect(normalized.preferences.defaultColumnWidth).toBe(520);
     expect(normalized.preferences.defaultRowHeight).toBe(64);
@@ -99,6 +99,7 @@ describe("learning model", () => {
     expect(normalized.frozenRootNodeIds).toEqual([]);
     expect(normalized.temporaryForks).toEqual([]);
     expect(normalized.nodeActivity).toEqual({});
+    expect(normalized.nodeLabels).toEqual({});
   });
 
   it("migrates v3 question nodes without rebuilding them", () => {
@@ -113,11 +114,12 @@ describe("learning model", () => {
       "file:///workspace",
     );
     expect(normalized).toMatchObject({
-      schemaVersion: 7,
+      schemaVersion: 8,
       rootThreadId: "root-thread",
       temporaryForks: [],
       nodeActivity: {},
       frozenRootNodeIds: [],
+      nodeLabels: {},
     });
     expect(normalized.nodes).toHaveLength(1);
   });
@@ -165,8 +167,29 @@ describe("learning model", () => {
       { ...previous, schemaVersion: 6, frozenRootNodeIds: ["ignored-in-v6"] },
       "file:///workspace",
     );
-    expect(normalized.schemaVersion).toBe(7);
+    expect(normalized.schemaVersion).toBe(8);
     expect(normalized.frozenRootNodeIds).toEqual([]);
+  });
+
+  it("normalizes persisted node labels without changing the original questions", () => {
+    const normalized = normalizeDocument(
+      {
+        ...defaultDocument("file:///old"),
+        nodeLabels: {
+          root: "  核心概念  ",
+          empty: "   ",
+          multiline: "第一行\n第二行",
+          long: "x".repeat(90),
+          invalid: 3,
+        },
+      },
+      "file:///workspace",
+    );
+    expect(normalized.nodeLabels).toEqual({
+      root: "核心概念",
+      multiline: "第一行 第二行",
+      long: "x".repeat(80),
+    });
   });
 
   it("extracts a concise assistant answer for the confirmation snapshot", () => {

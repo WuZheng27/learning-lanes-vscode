@@ -20,13 +20,14 @@ const MAX_TABLE_SCALE = 1.35;
 
 export function defaultDocument(workspaceUri: string): LearningDocument {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     workspaceUri,
     rootThreadId: null,
     hiddenTurnIds: [],
     frozenRootNodeIds: [],
     temporaryForks: [],
     nodeActivity: {},
+    nodeLabels: {},
     nodes: [],
     preferences: {
       textMode: "wrap",
@@ -80,32 +81,38 @@ export function normalizeDocument(value: unknown, workspaceUri: string): Learnin
       candidate.schemaVersion !== 4 &&
       candidate.schemaVersion !== 5 &&
       candidate.schemaVersion !== 6 &&
-      candidate.schemaVersion !== 7) ||
+      candidate.schemaVersion !== 7 &&
+      candidate.schemaVersion !== 8) ||
     !Array.isArray(candidate.nodes)
   ) {
     return fallback;
   }
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     workspaceUri,
     rootThreadId: typeof candidate.rootThreadId === "string" ? candidate.rootThreadId : null,
     hiddenTurnIds: stringArray(candidate.hiddenTurnIds),
     frozenRootNodeIds:
-      candidate.schemaVersion === 7 ? stringArray(candidate.frozenRootNodeIds) : [],
+      candidate.schemaVersion === 7 || candidate.schemaVersion === 8
+        ? stringArray(candidate.frozenRootNodeIds)
+        : [],
     temporaryForks:
       (candidate.schemaVersion === 4 ||
         candidate.schemaVersion === 5 ||
         candidate.schemaVersion === 6 ||
-        candidate.schemaVersion === 7) &&
+        candidate.schemaVersion === 7 ||
+        candidate.schemaVersion === 8) &&
       Array.isArray(candidate.temporaryForks)
         ? candidate.temporaryForks.filter(isTemporaryFork)
         : [],
     nodeActivity:
       candidate.schemaVersion === 5 ||
       candidate.schemaVersion === 6 ||
-      candidate.schemaVersion === 7
+      candidate.schemaVersion === 7 ||
+      candidate.schemaVersion === 8
         ? normalizeNodeActivity(candidate.nodeActivity)
         : {},
+    nodeLabels: normalizeNodeLabels(candidate.nodeLabels),
     nodes: candidate.nodes.filter(isLearningNode),
     preferences: normalizePreferences(candidate.preferences),
   };
@@ -127,13 +134,14 @@ function migrateLegacyDocument(
     }
   }
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     workspaceUri,
     rootThreadId,
     hiddenTurnIds: [],
     frozenRootNodeIds: [],
     temporaryForks: [],
     nodeActivity: {},
+    nodeLabels: {},
     nodes: [],
     preferences: normalizePreferences(candidate.preferences),
   };
@@ -192,6 +200,17 @@ function normalizeNodeActivity(value: unknown): Readonly<Record<string, Learning
       visitCount: Math.floor(activity.visitCount),
       lastVisitedAt: activity.lastVisitedAt ?? null,
     };
+  }
+  return result;
+}
+
+function normalizeNodeLabels(value: unknown): Readonly<Record<string, string>> {
+  if (!value || typeof value !== "object") return {};
+  const result: Record<string, string> = {};
+  for (const [nodeId, raw] of Object.entries(value)) {
+    if (typeof raw !== "string") continue;
+    const label = raw.trim().replace(/[\r\n]+/gu, " ");
+    if (label) result[nodeId] = label.slice(0, 80);
   }
   return result;
 }

@@ -93,6 +93,11 @@ export class NavigatorPanel implements vscode.Disposable {
           await this.#controller.toggleFreeze(message.nodeId);
         }
         break;
+      case "editLabel":
+        if (typeof message.nodeId === "string") {
+          await this.#controller.editNodeLabel(message.nodeId);
+        }
+        break;
       case "setTextMode":
         if (message.textMode === "wrap" || message.textMode === "ellipsis") {
           await this.#controller.setTextMode(message.textMode);
@@ -269,6 +274,7 @@ function webviewHtml(webview: vscode.Webview): string {
     .node.frozen.selected { border-color: var(--vscode-focusBorder); background: color-mix(in srgb, var(--vscode-list-inactiveSelectionBackground) 72%, var(--vscode-editor-background)); }
     .node .meta { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: var(--meta-gap, 6px); color: var(--vscode-descriptionForeground); font-size: var(--node-meta-size, 12px); }
     .node .title { font-family: var(--reading-font); font-size: var(--node-title-size, 15px); font-weight: 450; line-height: 1.55; letter-spacing: .012em; }
+    .node .title.custom-label { font-weight: 650; }
     .state { display: inline-flex; align-items: center; gap: 5px; }
     .state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
     .state.completed .state-dot { background: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
@@ -282,6 +288,7 @@ function webviewHtml(webview: vscode.Webview): string {
     .badge.approximate { color: var(--vscode-descriptionForeground); }
     .badge.temporary { color: var(--activity-accent); }
     .badge.frozen { color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground)); }
+    .badge.node-label { margin-left: 0; color: var(--activity-accent); }
     .activity-badge { margin-left: auto; color: var(--activity-accent); white-space: nowrap; }
     .collapse { min-height: 22px; height: 22px; min-width: 22px; padding: 0 5px; margin-left: auto; border: none; background: transparent; color: inherit; }
     .row-resizer { position: absolute; left: 0; right: 0; bottom: -4px; z-index: 8; height: 8px; cursor: row-resize; }
@@ -494,6 +501,8 @@ function webviewHtml(webview: vscode.Webview): string {
           const temporaryForks = forksByNode.get(node.id) || [];
           const activeTemporaryForks = temporaryForks.filter(fork => fork.state !== 'archived');
           const isFrozen = frozenByNode.has(node.id);
+          const nodeLabel = current.document.nodeLabels[node.id] || '';
+          const displayTitle = nodeLabel || node.title;
           const cell = document.createElement('div');
           cell.className = 'node heat-' + heat + (isFrozen ? ' frozen' : '') + (node.id === current.selectedNodeId ? ' selected' : '');
           cell.style.gridColumn = (placement.lane + 1) + ' / span ' + placement.columnSpan;
@@ -503,12 +512,22 @@ function webviewHtml(webview: vscode.Webview): string {
           if (isTabStop) rovingAssigned = true;
           cell.setAttribute('role', 'gridcell');
           cell.setAttribute('aria-selected', String(node.id === current.selectedNodeId));
-          cell.setAttribute('aria-label', node.title + '。单击查看快照。');
+          cell.setAttribute(
+            'aria-label',
+            nodeLabel
+              ? nodeLabel + '。原问题：' + node.title + '。单击查看快照。'
+              : node.title + '。单击查看快照。',
+          );
           const meta = document.createElement('div'); meta.className = 'meta';
           const state = document.createElement('span'); state.className = 'state ' + node.runtimeState;
           const stateDot = document.createElement('span'); stateDot.className = 'state-dot';
           const stateText = document.createElement('span'); stateText.textContent = labels[node.runtimeState] || node.runtimeState;
           state.append(stateDot, stateText); meta.append(state);
+          if (nodeLabel) {
+            const badge = document.createElement('span'); badge.className = 'badge node-label'; badge.textContent = '标签';
+            badge.title = '自定义展示标签；原问题保留在快照中';
+            meta.append(badge);
+          }
           if (isFrozen) { const badge = document.createElement('span'); badge.className = 'badge frozen'; badge.textContent = frozenByNode.get(node.id) === node.id ? '已冻结' : '随分支冻结'; badge.title = '此节点属于冻结归档分支'; meta.append(badge); }
           if (!node.navigationExact && temporaryForks.length === 0) { const badge = document.createElement('span'); badge.className = 'badge approximate'; badge.textContent = '需精确定位'; badge.title = '只有在快照中确认进入后，才会创建临时 Codex 分支'; meta.append(badge); }
           if (temporaryForks.length > 0) {
@@ -525,7 +544,11 @@ function webviewHtml(webview: vscode.Webview): string {
             const collapse = document.createElement('button'); collapse.className = 'collapse'; collapse.textContent = node.collapsed ? '▸' : '▾'; collapse.title = node.collapsed ? '展开子树' : '折叠子树'; collapse.setAttribute('aria-label', collapse.title); collapse.setAttribute('aria-expanded', String(!node.collapsed));
             collapse.addEventListener('click', event => { event.stopPropagation(); post('toggleCollapse', { nodeId: node.id }); }); meta.append(collapse);
           }
-          const title = document.createElement('div'); title.className = 'title'; title.textContent = node.title;
+          const title = document.createElement('div'); title.className = 'title'; title.textContent = displayTitle;
+          if (nodeLabel) {
+            title.classList.add('custom-label');
+            title.title = '原问题：' + node.title;
+          }
           cell.append(meta, title);
           cell.addEventListener('click', () => requestNodePreview(node.id));
           cell.addEventListener('keydown', event => {
@@ -574,7 +597,7 @@ function webviewHtml(webview: vscode.Webview): string {
       header.append(dialogTitle, close); shell.append(header);
       const inspector = document.createElement('section'); inspector.className = 'inspector'; inspector.setAttribute('aria-label', '节点快照');
       const main = document.createElement('div'); main.className = 'inspector-main';
-      const eyebrow = document.createElement('div'); eyebrow.className = 'eyebrow'; eyebrow.textContent = '问题'; main.append(eyebrow);
+      const eyebrow = document.createElement('div'); eyebrow.className = 'eyebrow'; eyebrow.textContent = preview.label ? '标签 · ' + preview.label : '问题'; main.append(eyebrow);
       if (preview.path.length > 0) {
         const breadcrumb = document.createElement('div'); breadcrumb.className = 'breadcrumb'; breadcrumb.textContent = preview.path.join('  /  '); breadcrumb.title = preview.path.join(' / '); main.append(breadcrumb);
       }
@@ -599,7 +622,14 @@ function webviewHtml(webview: vscode.Webview): string {
       appendMeta(meta, '归档', frozenRootId ? (frozenRootId === node.id ? '此处冻结' : '随上级冻结') : '工作中');
       appendMeta(meta, '访问', preview.visitCount ? preview.visitCount + ' 次' : '尚未进入');
       appendMeta(meta, '最近', formatRelativeTime(preview.lastVisitedAt));
+      appendMeta(meta, '标签', preview.label || '未设置');
       side.append(meta);
+      const editLabel = button(preview.label ? '修改节点标签' : '添加节点标签', 'editLabel', {
+        disabled: current.busy,
+        fields: { nodeId: node.id },
+        title: '自定义泳道中显示的文字；原问题仍保留在快照中',
+      });
+      side.append(editLabel);
       const temporary = current.document.temporaryForks.find(fork => fork.nodeId === node.id);
       const enterText = node.navigationExact || temporary ? '确定进入这个分支' : '创建精确定位并进入';
       const enter = button(enterText, 'openNode', { primary: true, disabled: current.busy, fields: { nodeId: node.id }, title: '在最右侧官方 Codex 中打开' });

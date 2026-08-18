@@ -181,6 +181,7 @@ export class NavigatorController implements vscode.Disposable {
           (fork) => fork.threadId !== selected.thread.id,
         ),
         nodeActivity: {},
+        nodeLabels: {},
         nodes: [],
       });
       this.#selectedNodeId = null;
@@ -282,10 +283,13 @@ export class NavigatorController implements vscode.Disposable {
     const ids = subtreeNodeIds(this.#document.nodes, this.#selectedNodeId);
     if (ids.size === 0) return;
     const selected = this.#document.nodes.find((node) => node.id === this.#selectedNodeId);
+    const selectedDisplayTitle = selected
+      ? (this.#document.nodeLabels[selected.id] ?? selected.title)
+      : "这个节点";
     const confirmation = await vscode.window.showWarningMessage(
       ids.size === 1
-        ? `要从学习导航器移除“${selected?.title ?? "这个节点"}”吗？正式 Codex 对话不会被删除。`
-        : `要从学习导航器移除“${selected?.title ?? "这个节点"}”及其 ${ids.size - 1} 个后代吗？正式 Codex 对话不会被删除。`,
+        ? `要从学习导航器移除“${selectedDisplayTitle}”吗？正式 Codex 对话不会被删除。`
+        : `要从学习导航器移除“${selectedDisplayTitle}”及其 ${ids.size - 1} 个后代吗？正式 Codex 对话不会被删除。`,
       { modal: true },
       "从导航器删除",
     );
@@ -296,6 +300,9 @@ export class NavigatorController implements vscode.Disposable {
     const nodeActivity = Object.fromEntries(
       Object.entries(this.#document.nodeActivity).filter(([nodeId]) => !ids.has(nodeId)),
     );
+    const nodeLabels = Object.fromEntries(
+      Object.entries(this.#document.nodeLabels).filter(([nodeId]) => !ids.has(nodeId)),
+    );
     await this.#commitUser({
       ...this.#document,
       rootThreadId: deletingRoot ? null : this.#document.rootThreadId,
@@ -304,6 +311,7 @@ export class NavigatorController implements vscode.Disposable {
         ? []
         : this.#document.frozenRootNodeIds.filter((nodeId) => !ids.has(nodeId)),
       nodeActivity: deletingRoot ? {} : nodeActivity,
+      nodeLabels: deletingRoot ? {} : nodeLabels,
       nodes: this.#document.nodes.filter((node) => !ids.has(node.id)),
     });
     const temporaryThreads = this.#document.temporaryForks
@@ -346,6 +354,33 @@ export class NavigatorController implements vscode.Disposable {
         node.id === nodeId ? { ...node, collapsed: !node.collapsed, updatedAt: now } : node,
       ),
     });
+  }
+
+  async editNodeLabel(nodeId: string): Promise<void> {
+    const node = this.#document.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    const currentLabel = this.#document.nodeLabels[nodeId] ?? "";
+    const input = await vscode.window.showInputBox({
+      title: "节点展示标签",
+      prompt: "标签会替代原问题显示在泳道中；清空输入可恢复显示原问题。",
+      placeHolder: node.title,
+      value: currentLabel,
+      valueSelection: [0, currentLabel.length],
+      ignoreFocusOut: true,
+      validateInput: (value) => {
+        if (/[\r\n]/u.test(value)) return "标签只能占一行。";
+        if (value.trim().length > 80) return "标签最多 80 个字符。";
+        return null;
+      },
+    });
+    if (input === undefined) return;
+    const label = input.trim();
+    const nodeLabels = { ...this.#document.nodeLabels };
+    if (label) nodeLabels[nodeId] = label;
+    else delete nodeLabels[nodeId];
+    if ((currentLabel || "") === label) return;
+    await this.#commitUser({ ...this.#document, nodeLabels });
+    this.#setMessage(label ? `已将节点显示标签设为“${label}”。` : "已清除节点标签，恢复显示原问题。", false);
   }
 
   async toggleFreeze(nodeId: string): Promise<void> {
@@ -692,7 +727,7 @@ export class NavigatorController implements vscode.Disposable {
     let cursor = node.parentNodeId ? nodesById.get(node.parentNodeId) : undefined;
     while (cursor && !seen.has(cursor.id)) {
       seen.add(cursor.id);
-      path.unshift(cursor.title);
+      path.unshift(this.#document.nodeLabels[cursor.id] ?? cursor.title);
       cursor = cursor.parentNodeId ? nodesById.get(cursor.parentNodeId) : undefined;
     }
     let turn = undefined;
@@ -705,6 +740,7 @@ export class NavigatorController implements vscode.Disposable {
     const questionMarkdown = turn ? extractQuestionMarkdown(turn) : node.title;
     return {
       nodeId: node.id,
+      label: this.#document.nodeLabels[node.id] ?? null,
       question: node.title,
       questionHtml: renderSnapshotMarkdown(questionMarkdown),
       answerHtml: answerMarkdown ? renderSnapshotMarkdown(answerMarkdown) : null,

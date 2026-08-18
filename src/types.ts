@@ -52,19 +52,21 @@ export interface TemporaryFork {
 }
 
 export interface LearningDocument {
-  readonly schemaVersion: 7;
+  readonly schemaVersion: 8;
   readonly workspaceUri: string;
   readonly rootThreadId: string | null;
   readonly hiddenTurnIds: ReadonlyArray<string>;
   readonly frozenRootNodeIds: ReadonlyArray<string>;
   readonly temporaryForks: ReadonlyArray<TemporaryFork>;
   readonly nodeActivity: Readonly<Record<string, LearningNodeActivity>>;
+  readonly nodeLabels: Readonly<Record<string, string>>;
   readonly nodes: ReadonlyArray<LearningNode>;
   readonly preferences: LearningPreferences;
 }
 
 export interface LearningNodePreview {
   readonly nodeId: string;
+  readonly label: string | null;
   readonly question: string;
   readonly questionHtml: string;
   readonly answerHtml: string | null;

@@ -5,6 +5,13 @@ import { LearningStore } from "./store.js";
 import { NavigatorPanel } from "./webview.js";
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
+  statusBarItem.name = "Codex Learning Navigator";
+  statusBarItem.text = "$(type-hierarchy) 学习泳道";
+  statusBarItem.tooltip = "点击打开 Codex 学习泳道";
+  statusBarItem.command = "learningNavigator.open";
+  statusBarItem.show();
+
   let controllerPromise: Promise<NavigatorController> | null = null;
   const controller = (): Promise<NavigatorController> => {
     controllerPromise ??= createController(context);
@@ -17,6 +24,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   context.subscriptions.push(
+    statusBarItem,
     vscode.commands.registerCommand("learningNavigator.open", async () => {
       await open();
     }),
@@ -48,7 +56,7 @@ async function createController(context: vscode.ExtensionContext): Promise<Navig
   if (!workspaceFolder) {
     throw new Error("Learning Navigator 需要先打开一个 VS Code 工作区文件夹。");
   }
-  const bridge = new CodexBridge(String(context.extension.packageJSON.version ?? "0.7.0"));
+  const bridge = new CodexBridge(String(context.extension.packageJSON.version ?? "0.8.0"));
   const store = new LearningStore(context, workspaceFolder.uri.toString());
   return NavigatorController.create(bridge, store, workspaceFolder);
 }

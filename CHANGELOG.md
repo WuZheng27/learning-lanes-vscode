@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 - 2026-08-18
+
+- Added optional per-node display labels while preserving the original Codex question in snapshots.
+- Added one-click Learning Lanes entry points in the status bar, editor title, and Explorer title.
+- Persisted labels across branch syncs with subtree deletion and in-window undo/redo support.
+
 ## 0.7.0-alpha - 2026-08-18
 
 - Added a compact lane table that maps one user question to one learning depth.

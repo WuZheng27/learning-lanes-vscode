@@ -61,4 +61,13 @@ describe("learning navigator webview source", () => {
     expect(source).toContain("冻结只整理学习泳道");
     expect(source).toContain("冻结此节点及子节点");
   });
+
+  it("uses optional display labels while retaining the original question in snapshots", () => {
+    expect(source).toContain('case "editLabel"');
+    expect(source).toContain("current.document.nodeLabels[node.id]");
+    expect(source).toContain("title.textContent = displayTitle");
+    expect(source).toContain("preview.label ? '修改节点标签' : '添加节点标签'");
+    expect(source).toContain("'原问题：' + node.title");
+    expect(source).toContain("question.innerHTML = preview.questionHtml");
+  });
 });
