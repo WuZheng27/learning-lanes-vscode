@@ -1,0 +1,14 @@
+.gitignore
+.vscodeignore
+.github/**
+esbuild.mjs
+scripts/**
+src/**
+test/**
+tsconfig.json
+vitest.config.ts
+pnpm-lock.yaml
+pnpm-workspace.yaml
+node_modules/**
+dist/*.map
+dist/*smoke.cjs
