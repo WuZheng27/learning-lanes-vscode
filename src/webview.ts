@@ -258,7 +258,9 @@ function webviewHtml(webview: vscode.Webview): string {
     .column-resizer { position: absolute; top: 0; right: -4px; z-index: 5; width: 8px; height: 100%; cursor: col-resize; }
     .column-resizer:hover { border-right: 2px solid var(--vscode-focusBorder); }
     .column-resizer:focus-visible, .row-resizer:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
-    .lane-row { border-left: 1px solid var(--structure-border); border-bottom: 1px solid var(--structure-border); background: var(--vscode-editor-background); }
+    .lane-body { position: relative; }
+    .lane-background { position: absolute; inset: 0; display: grid; pointer-events: none; }
+    .lane-row { border-left: 1px solid var(--structure-border); border-bottom: 1px solid var(--structure-border); background: transparent; }
     .lane-slot { min-width: 0; border-right: 1px solid var(--structure-border); background: color-mix(in srgb, var(--vscode-editor-background) 98%, var(--vscode-foreground)); }
     .lane-slot.frozen { background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-descriptionForeground)); }
     .node { position: relative; z-index: 2; min-width: 0; margin: -1px 0 0 -1px; padding: var(--cell-pad-y, 9px) var(--cell-pad-x, 11px) var(--cell-pad-y, 9px) calc(var(--cell-pad-x, 11px) + 3px); border: 1px solid var(--structure-border); background: var(--vscode-editor-background); cursor: pointer; overflow: hidden; }
@@ -308,6 +310,8 @@ function webviewHtml(webview: vscode.Webview): string {
     let current = null;
     let dismissedPreviewNodeId = null;
     let resizeFrame = 0;
+    let renderedTableVersion = null;
+    let renderedWidth = -1;
     const post = (type, fields = {}) => vscode.postMessage({ type, ...fields });
     const app = document.getElementById('app');
     const labels = { waiting: '等待提问', running: '运行中', completed: '已完成', failed: '失败', interrupted: '已中断' };
@@ -373,7 +377,10 @@ function webviewHtml(webview: vscode.Webview): string {
         focusedNodeId: document.activeElement?.closest?.('.node')?.dataset.nodeId || null,
         focusedSnapshot: document.activeElement === oldSnapshot,
       };
-      app.replaceChildren();
+      const reuseTable = oldTableScroll && current.tableVersion !== undefined && renderedTableVersion === current.tableVersion && renderedWidth === app.clientWidth;
+      if (reuseTable) {
+        for (const child of [...app.children]) if (child !== oldTableScroll) child.remove();
+      } else app.replaceChildren();
       const selected = current.document.nodes.find(node => node.id === current.selectedNodeId);
       const preferences = current.document.preferences;
       const toolbar = document.createElement('div');
@@ -415,7 +422,7 @@ function webviewHtml(webview: vscode.Webview): string {
         button('↷', 'redo', { disabled: current.busy || !current.canRedo, title: '重做' }),
         button('删除', 'delete', { disabled: current.busy || !selected, title: '删除选中节点及全部后代（Delete）' })
       );
-      app.append(toolbar);
+      if (reuseTable) app.insertBefore(toolbar, oldTableScroll); else app.append(toolbar);
 
       const status = document.createElement('div');
       const compatibility = current.compatibility;
@@ -428,8 +435,20 @@ function webviewHtml(webview: vscode.Webview): string {
       status.setAttribute('role', 'status');
       status.setAttribute('aria-live', 'polite');
       status.textContent = message;
-      app.append(status);
+      if (reuseTable) app.insertBefore(status, oldTableScroll); else app.append(status);
 
+      if (reuseTable) {
+        oldTableScroll.querySelectorAll('.node').forEach((cell, index) => {
+          const selected = cell.dataset.nodeId === current.selectedNodeId;
+          cell.classList.toggle('selected', selected);
+          cell.setAttribute('aria-selected', String(selected));
+          cell.tabIndex = selected || (!current.selectedNodeId && index === 0) ? 0 : -1;
+        });
+        renderPreview(selected, restore, oldTableScroll);
+        return;
+      }
+      renderedTableVersion = current.tableVersion;
+      renderedWidth = app.clientWidth;
       if (current.layout.laneCount === 0) {
         const empty = document.createElement('div'); empty.className = 'empty';
         empty.textContent = current.document.rootThreadId
@@ -462,9 +481,10 @@ function webviewHtml(webview: vscode.Webview): string {
       table.style.setProperty('--meta-gap', Math.max(4, Math.round(7 * metrics.effectiveScale)) + 'px');
       const header = document.createElement('div'); header.className = 'header'; header.style.gridTemplateColumns = columns; header.setAttribute('role', 'row');
       header.style.height = Math.max(38, Math.round(46 * metrics.effectiveScale)) + 'px';
+      const activityByLane = allLaneActivity();
       current.layout.laneKeys.forEach((key, lane) => {
         const isFrozenLane = frozenLaneFlags[lane];
-        const aggregate = laneActivity(lane);
+        const aggregate = activityByLane[lane];
         const heat = activityHeat(aggregate);
         const cell = document.createElement('div'); cell.className = 'lane-header heat-' + heat + (isFrozenLane ? ' frozen' : ''); cell.style.gridColumn = String(lane + 1); cell.setAttribute('role', 'columnheader');
         const symbol = document.createElement('span'); symbol.className = 'lane-symbol'; symbol.textContent = '⌘';
@@ -483,6 +503,12 @@ function webviewHtml(webview: vscode.Webview): string {
       });
       table.append(header);
 
+      const body = document.createElement('div'); body.className = 'lane-body';
+      const background = document.createElement('div'); background.className = 'lane-background'; background.style.gridTemplateColumns = columns; background.setAttribute('aria-hidden', 'true');
+      frozenLaneFlags.forEach((frozen, lane) => {
+        const slot = document.createElement('div'); slot.className = 'lane-slot' + (frozen ? ' frozen' : ''); slot.style.gridColumn = String(lane + 1); background.append(slot);
+      });
+      body.append(background); table.append(body);
       let rovingAssigned = false;
       current.layout.rows.forEach((placements, depth) => {
         const explicitHeight = preferences.rowHeights[String(depth)];
@@ -490,9 +516,6 @@ function webviewHtml(webview: vscode.Webview): string {
         const height = Math.max(54, Math.round(logicalHeight * metrics.effectiveScale));
         const row = document.createElement('div'); row.className = 'lane-row'; row.style.gridTemplateColumns = columns; row.setAttribute('role', 'row');
         if (explicitHeight) row.style.height = height + 'px'; else row.style.minHeight = height + 'px';
-        for (let lane = 0; lane < current.layout.laneCount; lane += 1) {
-          const slot = document.createElement('div'); slot.className = 'lane-slot' + (frozenLaneFlags[lane] ? ' frozen' : ''); slot.style.gridColumn = String(lane + 1); slot.setAttribute('aria-hidden', 'true'); row.append(slot);
-        }
         placements.forEach(placement => {
           if (!placement) return;
           const node = placement.node;
@@ -563,9 +586,13 @@ function webviewHtml(webview: vscode.Webview): string {
         });
         const handle = document.createElement('div'); handle.className = 'row-resizer'; handle.setAttribute('aria-label', '调整这一行高度');
         makeResizeHandle(handle, 'y', logicalHeight, metrics.effectiveScale, value => post('resizeRow', { depth, height: value }));
-        row.append(handle); table.append(row);
+        row.append(handle); body.append(row);
       });
       tableScroll.append(table); app.append(tableScroll);
+      renderPreview(selected, restore, tableScroll);
+    }
+
+    function renderPreview(selected, restore, tableScroll) {
       let previewDialog = null;
       if (
         selected &&
@@ -684,19 +711,17 @@ function webviewHtml(webview: vscode.Webview): string {
       container.append(key, content);
     }
 
-    function laneActivity(lane) {
-      const nodeIds = new Set();
+    function allLaneActivity() {
+      const totals = Array.from({ length: current.layout.laneCount }, () => ({ visitCount: 0, lastVisitedAt: null }));
       current.layout.rows.forEach(placements => placements.forEach(placement => {
-        if (placement && placement.lane === lane && placement.columnSpan === 1) nodeIds.add(placement.node.id);
-      }));
-      let visitCount = 0; let lastVisitedAt = null;
-      nodeIds.forEach(nodeId => {
-        const activity = current.document.nodeActivity[nodeId];
+        if (!placement || placement.columnSpan !== 1) return;
+        const activity = current.document.nodeActivity[placement.node.id];
         if (!activity) return;
-        visitCount += activity.visitCount;
-        if (activity.lastVisitedAt && (!lastVisitedAt || activity.lastVisitedAt > lastVisitedAt)) lastVisitedAt = activity.lastVisitedAt;
-      });
-      return { visitCount, lastVisitedAt };
+        const total = totals[placement.lane];
+        total.visitCount += activity.visitCount;
+        if (activity.lastVisitedAt && (!total.lastVisitedAt || activity.lastVisitedAt > total.lastVisitedAt)) total.lastVisitedAt = activity.lastVisitedAt;
+      }));
+      return totals;
     }
 
     function activityHeat(activity) {
@@ -723,6 +748,7 @@ function webviewHtml(webview: vscode.Webview): string {
     }
 
     function frozenNodeRoots(nodes, frozenRootNodeIds) {
+      if (frozenRootNodeIds.length === 0) return new Map();
       const nodesById = new Map(nodes.map(node => [node.id, node]));
       const frozenRoots = new Set(frozenRootNodeIds.filter(nodeId => nodesById.has(nodeId)));
       const result = new Map();
@@ -806,7 +832,7 @@ function webviewHtml(webview: vscode.Webview): string {
           if (axis === 'x') {
             const header = element.closest('.header');
             const lane = [...header.children].indexOf(element.parentElement);
-            app.querySelectorAll('.header, .lane-row').forEach(grid => {
+            app.querySelectorAll('.header, .lane-row, .lane-background').forEach(grid => {
               const tracks = grid.style.gridTemplateColumns.split(' ');
               tracks[lane] = Math.max(132, rendered) + 'px';
               grid.style.gridTemplateColumns = tracks.join(' ');

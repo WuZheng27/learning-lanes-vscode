@@ -39,8 +39,9 @@ export class AppServerClient {
 
   async start(): Promise<void> {
     if (this.#disposed) throw new Error("App Server client is disposed.");
+    if (this.#startPromise) return this.#startPromise;
     if (this.#child) return;
-    this.#startPromise ??= this.#start();
+    this.#startPromise = this.#start();
     try {
       await this.#startPromise;
     } finally {
@@ -85,7 +86,7 @@ export class AppServerClient {
           experimentalApi: true,
         },
       },
-      20_000,
+      60_000,
     );
     this.notify("initialized", {});
   }

@@ -8,6 +8,13 @@ afterEach(() => {
 });
 
 describe("AppServerClient", () => {
+  it("waits for initialization before sending concurrent discovery requests", async () => {
+    const client = new AppServerClient(process.execPath, "test", [join(process.cwd(), "test", "fixtures", "mock-app-server.cjs")]);
+    clients.push(client);
+    const results = await Promise.all(Array.from({ length: 12 }, () => client.request<{ data: unknown[] }>("thread/list", {})));
+    expect(results.every(result => result.data.length === 1)).toBe(true);
+  });
+
   it("initializes experimental reads and lists without creating tasks", async () => {
     const fixture = join(process.cwd(), "test", "fixtures", "mock-app-server.cjs");
     const client = new AppServerClient(process.execPath, "test", [fixture]);

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { mapWithConcurrency, relatedThreads } from "./threadDiscovery.js";
 import { AppServerClient } from "./appServerClient.js";
 import {
   bundledCodexRelativePath,
@@ -28,7 +29,10 @@ export interface CodexCompatibility {
 
 export class CodexBridge implements vscode.Disposable {
   readonly #extensionVersion: string;
-  readonly #threadParentCache = new Map<string, string | null>();
+  readonly #threadParentCache = new Map<string, Pick<CodexListedThread, "forkedFromId" | "parentKnown">>();
+  #rootCache: ReadonlyArray<CodexListedThread> = [];
+
+  get cachedRootThreads(): ReadonlyArray<CodexListedThread> { return this.#rootCache; }
   #client: AppServerClient | null = null;
   #compatibility: CodexCompatibility | null = null;
 
@@ -111,40 +115,44 @@ export class CodexBridge implements vscode.Disposable {
     });
   }
 
-  async listAllRootThreads(): Promise<ReadonlyArray<CodexListedThread>> {
-    const threads = await this.#listThreads({
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      archived: false,
-      sourceKinds: ["vscode"],
-    });
-    const client = await this.#clientForRequest();
-    const hydrated = await mapWithConcurrency(threads, 12, async (thread) => {
-      if (thread.forkedFromId) {
-        this.#threadParentCache.set(thread.id, thread.forkedFromId);
-        return thread;
-      }
-      if (this.#threadParentCache.has(thread.id)) {
-        return {
-          ...thread,
-          forkedFromId: this.#threadParentCache.get(thread.id) ?? null,
-        };
-      }
+  async #hydrateParents(threads: ReadonlyArray<CodexListedThread>, signal?: AbortSignal): Promise<ReadonlyArray<CodexListedThread>> {
+    return mapWithConcurrency(threads, 6, async thread => {
+      if (thread.parentKnown || thread.forkedFromId) return thread;
+      const cached = this.#threadParentCache.get(thread.id);
+      if (cached) return { ...thread, ...cached };
       try {
-        const snapshot = parseThreadSnapshot(
-          await client.request<unknown>("thread/read", {
-            threadId: thread.id,
-            includeTurns: false,
-          }),
-        );
-        this.#threadParentCache.set(thread.id, snapshot.forkedFromId);
-        return { ...thread, forkedFromId: snapshot.forkedFromId };
-      } catch {
-        // Keep an otherwise discoverable task when one lightweight summary read fails.
-        return thread;
+        const client = await this.#clientForRequest();
+        const snapshot = parseThreadSnapshot(await client.request<unknown>("thread/read", { threadId: thread.id, includeTurns: false }));
+        const parent = { forkedFromId: snapshot.forkedFromId, parentKnown: snapshot.parentKnown ?? false };
+        if (parent.parentKnown) {
+          this.#threadParentCache.set(thread.id, parent);
+          if (this.#threadParentCache.size > 10_000) this.#threadParentCache.delete(this.#threadParentCache.keys().next().value!);
+        }
+        return { ...thread, ...parent };
+      } catch { return thread; }
+    }, signal);
+  }
+
+  async listRelatedThreads(rootId: string, cwd: string): Promise<ReadonlyArray<CodexListedThread>> {
+    return relatedThreads(rootId, await this.#hydrateParents(await this.listWorkspaceThreads(cwd)));
+  }
+
+  async listAllRootThreads(
+    onUpdate?: (roots: ReadonlyArray<CodexListedThread>) => void,
+    signal?: AbortSignal,
+  ): Promise<ReadonlyArray<CodexListedThread>> {
+    const roots = new Map<string, CodexListedThread>();
+    await this.#listThreads({
+      sortKey: "updated_at", sortDirection: "desc", archived: false, sourceKinds: ["vscode"],
+    }, async page => {
+      for (const thread of await this.#hydrateParents(page, signal)) {
+        if (thread.forkedFromId === null) roots.set(thread.id, thread);
       }
-    });
-    return hydrated.filter((thread) => thread.forkedFromId === null);
+      this.#rootCache = [...new Map([...this.#rootCache, ...roots.values()].map(thread => [thread.id, thread])).values()];
+      onUpdate?.([...roots.values()]);
+    }, signal);
+    this.#rootCache = [...roots.values()];
+    return this.#rootCache;
   }
 
   async forkThread(threadId: string, lastTurnId: string): Promise<{ threadId: string }> {
@@ -213,19 +221,24 @@ export class CodexBridge implements vscode.Disposable {
 
   async #listThreads(
     parameters: Readonly<Record<string, unknown>>,
+    onPage?: (page: ReadonlyArray<CodexListedThread>) => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<ReadonlyArray<CodexListedThread>> {
     const client = await this.#clientForRequest();
     const threads = new Map<string, CodexListedThread>();
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
     for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      signal?.throwIfAborted();
       const result = await client.request<unknown>("thread/list", {
         ...parameters,
         limit: 200,
         cursor,
       });
       const page = parseThreadListPage(result);
+      signal?.throwIfAborted();
       for (const thread of page.data) threads.set(thread.id, thread);
+      await onPage?.(page.data);
       if (!page.nextCursor || seenCursors.has(page.nextCursor)) break;
       seenCursors.add(page.nextCursor);
       cursor = page.nextCursor;
@@ -241,12 +254,13 @@ export class CodexBridge implements vscode.Disposable {
         this.#extensionVersion,
       );
     }
+    const client = this.#client;
     try {
-      await this.#client.start();
-      return this.#client;
+      await client.start();
+      return client;
     } catch (error) {
-      this.#client.dispose();
-      this.#client = null;
+      if (this.#client === client) this.#client = null;
+      client.dispose();
       throw error;
     }
   }
@@ -260,26 +274,4 @@ export class CodexBridge implements vscode.Disposable {
     this.#client?.dispose();
     this.#client = null;
   }
-}
-
-async function mapWithConcurrency<T, R>(
-  values: ReadonlyArray<T>,
-  concurrency: number,
-  mapper: (value: T) => Promise<R>,
-): Promise<ReadonlyArray<R>> {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(Math.max(1, concurrency), values.length) },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        const value = values[index];
-        if (value !== undefined) results[index] = await mapper(value);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }

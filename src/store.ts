@@ -6,6 +6,7 @@ export class LearningStore {
   readonly #storageDirectory: vscode.Uri;
   readonly #documentUri: vscode.Uri;
   readonly #workspaceUri: string;
+  #writeTail: Promise<void> = Promise.resolve();
 
   constructor(context: vscode.ExtensionContext, workspaceUri: string) {
     this.#storageDirectory = context.storageUri ?? context.globalStorageUri;
@@ -23,7 +24,13 @@ export class LearningStore {
     }
   }
 
-  async write(document: LearningDocument): Promise<void> {
+  write(document: LearningDocument): Promise<void> {
+    const write = this.#writeTail.then(() => this.#writeDocument(document));
+    this.#writeTail = write.catch(() => undefined);
+    return write;
+  }
+
+  async #writeDocument(document: LearningDocument): Promise<void> {
     await vscode.workspace.fs.createDirectory(this.#storageDirectory);
     const temporary = vscode.Uri.joinPath(
       this.#storageDirectory,

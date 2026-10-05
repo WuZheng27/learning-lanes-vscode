@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+- Show cached root choices immediately and progressively fill the picker; cancel unused discovery work.
+- Discover related threads from parent metadata before reading full histories, retaining a legacy prefix fallback.
+- Reuse bounded cross-root snapshot caches, limit read concurrency, and discard stale background sync results.
+- Aggregate lane activity in one pass, share background columns, and preserve table DOM on selection/status updates.
+- Cache unchanged layouts and avoid unrelated-thread comparisons during legacy parent inference.
+- Wait for App Server initialization before concurrent requests; allow slower cold startup up to 60 seconds.
+- Add discovery, cancellation, controller race/cache, and Webview DOM regression tests.
+
 ## 0.8.0 - 2026-08-18
 
 - Added optional per-node display labels while preserving the original Codex question in snapshots.

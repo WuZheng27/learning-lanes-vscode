@@ -308,10 +308,16 @@ Release VSIX files should be attached to GitHub Releases instead of committed to
 
 ## Project status
 
-Version 0.8.0 is an experimental MVP. The storage schema is versioned and migrates earlier local
+Version 0.8.1 is an experimental MVP. The storage schema is versioned and migrates earlier local
 documents, but the integration should still be treated as compatibility-sensitive software.
 Issues and reproducible compatibility reports are welcome.
 
 ## License
 
 [MIT](LICENSE)
+
+## Performance (0.8.1)
+
+Root selection opens with cached choices and updates progressively. Current backends supply parent metadata, so unrelated histories are filtered before full reads. Older backends retain turn-prefix discovery. Full reads use six workers, snapshots are retained across root switches, and stale sync results are discarded. The cache retains the current working set plus up to a 128-thread total target; very large active trees can exceed that target. Selection and status updates preserve the existing table, while background columns and activity aggregation avoid work proportional to every row/column pair per lane.
+
+See [performance validation](docs/performance-0.8.1.md) for measurements and test boundaries.

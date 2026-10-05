@@ -661,6 +661,13 @@ export function inferTaskParentIds(
 ): ReadonlyMap<string, string> {
   const listedById = new Map(listedThreads.map((thread) => [thread.id, thread]));
   const result = new Map<string, string>();
+  const byFirstTurn = new Map<string, CodexListedThread[]>();
+  for (const thread of listedThreads) {
+    const first = snapshots.get(thread.id)?.turns[0]?.id;
+    if (!first) continue;
+    const bucket = byFirstTurn.get(first) ?? [];
+    bucket.push(thread); byFirstTurn.set(first, bucket);
+  }
   for (const child of listedThreads) {
     const childSnapshot = snapshots.get(child.id);
     const explicitParent = child.forkedFromId ?? childSnapshot?.forkedFromId ?? null;
@@ -668,11 +675,12 @@ export function inferTaskParentIds(
       result.set(child.id, explicitParent);
       continue;
     }
+    if (child.parentKnown || childSnapshot?.parentKnown) continue;
     if (!childSnapshot || childSnapshot.turns.length === 0) continue;
     let best:
       | { readonly thread: CodexListedThread; readonly commonTurns: number }
       | undefined;
-    for (const candidate of listedThreads) {
+    for (const candidate of byFirstTurn.get(childSnapshot.turns[0]!.id) ?? []) {
       if (candidate.id === child.id || compareTaskCreation(candidate, child) >= 0) continue;
       const candidateSnapshot = snapshots.get(candidate.id);
       if (!candidateSnapshot) continue;

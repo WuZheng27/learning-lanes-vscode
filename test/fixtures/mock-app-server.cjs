@@ -19,6 +19,7 @@ const threads = new Map([
   ],
 ]);
 let nextFork = 1;
+let initialized = false;
 
 reader.on("line", (line) => {
   const message = JSON.parse(line);
@@ -27,10 +28,17 @@ reader.on("line", (line) => {
       send({ id: message.id, error: { code: -32602, message: "experimentalApi required" } });
       return;
     }
-    send({ id: message.id, result: { userAgent: "mock" } });
+    setTimeout(() => {
+      initialized = true;
+      send({ id: message.id, result: { userAgent: "mock" } });
+    }, 20);
     return;
   }
   if (message.method === "initialized") return;
+  if (!initialized) {
+    send({ id: message.id, error: { code: -32000, message: "not initialized" } });
+    return;
+  }
   if (message.method === "test/pid") {
     send({ id: message.id, result: { pid: process.pid } });
     return;

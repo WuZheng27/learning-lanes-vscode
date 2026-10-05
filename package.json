@@ -2,7 +2,7 @@
   "name": "codex-learning-navigator",
   "displayName": "Codex Learning Navigator",
   "description": "A lane-table navigator with exact temporary forks for official Codex task branches.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "local-learning-tools",
   "license": "MIT",
   "repository": {
@@ -96,7 +96,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "smoke:app-server": "node scripts/app-server-smoke.cjs",
-    "package": "pnpm run check && pnpm run test && pnpm run build && vsce package --no-dependencies --allow-missing-repository --out dist/codex-learning-navigator-0.8.0.vsix"
+    "package": "pnpm run check && pnpm run test && pnpm run build && vsce package --no-dependencies --allow-missing-repository --out dist/codex-learning-navigator-0.8.1.vsix"
   },
   "dependencies": {
     "katex": "^0.16.47",
@@ -111,10 +111,12 @@
     "unified": "^11.0.5"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.96.2",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
+    "jsdom": "^30.1.1",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }

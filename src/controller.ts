@@ -7,7 +7,6 @@ import {
   clampFontScale,
   clampRowHeight,
   clampTableScale,
-  cloneDocument,
   extractAnswerPreview,
   extractQuestionMarkdown,
   frozenNodeRootMap,
@@ -17,7 +16,8 @@ import {
 } from "./model.js";
 import { renderSnapshotMarkdown } from "./markdown.js";
 import { LearningStore } from "./store.js";
-import { buildRootThreadChoices } from "./rootThreads.js";
+import { pickRootThread } from "./rootPicker.js";
+import { mapWithConcurrency } from "./threadDiscovery.js";
 import {
   createTemporaryFork,
   decideTemporaryForkMaintenance,
@@ -59,6 +59,12 @@ export class NavigatorController implements vscode.Disposable {
   readonly #snapshotCache = new Map<string, CodexThreadSnapshot>();
   readonly #pollTimer: NodeJS.Timeout;
   #document: LearningDocument;
+  #generation = 0;
+  #tableVersion = 0;
+  #tableInputs: unknown[] = [];
+  #syncJob: { generation: number; promise: Promise<void> } | null = null;
+  #layoutNodes: LearningDocument["nodes"] | null = null;
+  #layout = buildLaneLayout([]);
   #selectedNodeId: string | null = null;
   #busy = false;
   #polling = false;
@@ -101,9 +107,19 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   getState(): NavigatorViewState {
+    if (this.#layoutNodes !== this.#document.nodes) {
+      this.#layoutNodes = this.#document.nodes;
+      this.#layout = buildLaneLayout(this.#document.nodes);
+    }
+    const doc = this.#document;
+    const inputs = [doc.nodes, doc.preferences, doc.nodeLabels, doc.nodeActivity, doc.frozenRootNodeIds, doc.temporaryForks];
+    if (inputs.some((value, index) => value !== this.#tableInputs[index])) {
+      this.#tableVersion++; this.#tableInputs = inputs;
+    }
     return {
+      tableVersion: this.#tableVersion,
       document: this.#document,
-      layout: buildLaneLayout(this.#document.nodes),
+      layout: this.#layout,
       selectedNodeId: this.#selectedNodeId,
       selectedNodePreview: this.#selectedNodePreview(),
       canUndo: this.#history.canUndo,
@@ -147,28 +163,10 @@ export class NavigatorController implements vscode.Disposable {
       const temporaryThreadIds = new Set(
         this.#document.temporaryForks.map((fork) => fork.threadId),
       );
-      this.#setMessage("正在读取全部官方 Codex 对话并隐藏分支，请稍候…", false);
-      const choices = buildRootThreadChoices(
-        await this.#bridge.listAllRootThreads(),
-        this.#document.rootThreadId,
-        this.#workspaceFolder.uri.fsPath,
-        temporaryThreadIds,
-      );
-      this.#setMessage(`已整理出 ${choices.length} 个官方根对话；可按标题、项目路径或任务 ID 搜索。`, false);
-      if (choices.length === 0) {
-        void vscode.window.showInformationMessage(
-          "没有找到可用的官方 Codex 根对话。请先在官方 Codex 中开始一次对话。",
-        );
-        return;
-      }
-      const selected = await vscode.window.showQuickPick(
-        choices,
-        {
-          title: "更换学习泳道根对话（已隐藏所有分支）",
-          placeHolder: "输入对话标题、问题、项目路径或任务 ID 搜索全部官方 Codex 根对话",
-          matchOnDescription: true,
-          matchOnDetail: true,
-        },
+      const selected = await pickRootThread(
+        this.#bridge.cachedRootThreads,
+        (update, signal) => this.#bridge.listAllRootThreads(update, signal),
+        this.#document.rootThreadId, this.#workspaceFolder.uri.fsPath, temporaryThreadIds,
       );
       if (!selected) return;
       const previouslyActive = this.#activeTemporaryThreadId;
@@ -185,7 +183,7 @@ export class NavigatorController implements vscode.Disposable {
         nodes: [],
       });
       this.#selectedNodeId = null;
-      this.#snapshotCache.clear();
+      this.#generation += 1;
       await this.#syncOfficialTasks();
       this.#selectedNodeId = this.#document.nodes.find((node) => node.parentNodeId === null)?.id ?? null;
       await this.#bridge.openSidebarThread(selected.thread.id);
@@ -273,7 +271,7 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   selectNode(nodeId: string): void {
-    if (!this.#document.nodes.some((node) => node.id === nodeId)) return;
+    if (!this.#document.nodes.some(node => node.id === nodeId)) return;
     this.#selectedNodeId = nodeId;
     this.#emit();
   }
@@ -329,6 +327,7 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   async undo(): Promise<void> {
+    this.#generation += 1;
     const previous = this.#history.undo(this.#document);
     if (!previous) return;
     this.#document = previous;
@@ -338,6 +337,7 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   async redo(): Promise<void> {
+    this.#generation += 1;
     const next = this.#history.redo(this.#document);
     if (!next) return;
     this.#document = next;
@@ -498,9 +498,10 @@ export class NavigatorController implements vscode.Disposable {
       return;
     }
     this.#polling = true;
+    const generation = this.#generation;
     try {
       await this.#syncOfficialTasks();
-      await this.#maintainTemporaryForks();
+      if (generation === this.#generation && !this.#busy) await this.#maintainTemporaryForks();
     } catch {
       // Manual sync exposes actionable errors. Polling remains deliberately quiet.
     } finally {
@@ -509,15 +510,26 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   async #syncOfficialTasks(): Promise<void> {
+    const generation = this.#generation;
+    if (this.#syncJob?.generation === generation) return this.#syncJob.promise;
+    const promise = this.#runSync(generation);
+    const job = { generation, promise }; this.#syncJob = job;
+    try { await promise; } finally { if (this.#syncJob === job) this.#syncJob = null; }
+  }
+
+  async #runSync(generation: number): Promise<void> {
     const rootThreadId = this.#document.rootThreadId;
     if (!rootThreadId) return;
+    const stale = (): boolean => this.#disposed || generation !== this.#generation || rootThreadId !== this.#document.rootThreadId;
     let rootSnapshot = this.#snapshotCache.get(rootThreadId);
     if (!rootSnapshot) {
       rootSnapshot = await this.#bridge.readThread(rootThreadId);
+      if (stale()) return;
       this.#snapshotCache.set(rootThreadId, rootSnapshot);
     }
     const cwd = rootSnapshot.cwd ?? this.#workspaceFolder.uri.fsPath;
-    const workspaceThreads = await this.#bridge.listWorkspaceThreads(cwd);
+    const workspaceThreads = await this.#bridge.listRelatedThreads(rootThreadId, cwd);
+    if (stale()) return;
     const listedById = new Map<string, CodexListedThread>();
     for (const thread of workspaceThreads) listedById.set(thread.id, thread);
 
@@ -527,18 +539,24 @@ export class NavigatorController implements vscode.Disposable {
     for (const fork of this.#document.temporaryForks) {
       if (fork.state !== "archived") idsToRead.add(fork.threadId);
     }
-    await Promise.all(
-      [...idsToRead].map(async (threadId) => {
+    await mapWithConcurrency([...idsToRead], 6, async (threadId) => {
+        if (stale()) return;
         const listed = listedById.get(threadId);
         const cached = this.#snapshotCache.get(threadId);
-        if (cached && listed && cached.updatedAt === listed.updatedAt) {
+        if (cached && listed && listed.updatedAt !== null && cached.updatedAt === listed.updatedAt) {
           return;
         }
-        this.#snapshotCache.set(threadId, await this.#bridge.readThread(threadId));
-      }),
-    );
+        const snapshot = await this.#bridge.readThread(threadId);
+        if (!stale()) this.#snapshotCache.set(threadId, snapshot);
+      });
+    if (stale()) return;
+    // Bound cross-root history memory, keeping every snapshot needed by this sync.
+    for (const id of this.#snapshotCache.keys()) {
+      if (this.#snapshotCache.size <= Math.max(128, idsToRead.size)) break;
+      if (!idsToRead.has(id)) this.#snapshotCache.delete(id);
+    }
     if (!rootListed) {
-      listedById.set(rootThreadId, listedFromSnapshot(rootSnapshot));
+      listedById.set(rootThreadId, listedFromSnapshot(this.#snapshotCache.get(rootThreadId) ?? rootSnapshot));
     }
 
     const promotedThreadIds = new Set(
@@ -568,15 +586,16 @@ export class NavigatorController implements vscode.Disposable {
       this.#document.nodes,
       new Set(this.#document.hiddenTurnIds),
     );
+    const nodeIds = new Set(nodes.map(node => node.id));
     const nextDocument = {
       ...this.#document,
       temporaryForks: remainingTemporaryForks,
       frozenRootNodeIds: this.#document.frozenRootNodeIds.filter((nodeId) =>
-        nodes.some((node) => node.id === nodeId),
+        nodeIds.has(nodeId),
       ),
       nodeActivity: Object.fromEntries(
         Object.entries(this.#document.nodeActivity).filter(([nodeId]) =>
-          nodes.some((node) => node.id === nodeId),
+          nodeIds.has(nodeId),
         ),
       ),
       nodes,
@@ -619,6 +638,8 @@ export class NavigatorController implements vscode.Disposable {
 
   async #maintainTemporaryForks(): Promise<void> {
     if (this.#document.temporaryForks.length === 0) return;
+    const generation = this.#generation;
+    const stale = (): boolean => this.#disposed || generation !== this.#generation;
     const cwd =
       (this.#document.rootThreadId
         ? this.#snapshotCache.get(this.#document.rootThreadId)?.cwd
@@ -627,6 +648,7 @@ export class NavigatorController implements vscode.Disposable {
     let storageChanged = false;
     let taskSetChanged = false;
     for (const fork of this.#document.temporaryForks) {
+      if (stale()) return;
       if (fork.threadId === this.#activeTemporaryThreadId) {
         retained.push(fork);
         continue;
@@ -638,11 +660,13 @@ export class NavigatorController implements vscode.Disposable {
         retained.push(fork);
         continue;
       }
+      if (stale()) return;
       this.#snapshotCache.set(fork.threadId, snapshot);
       let action = decideTemporaryForkMaintenance(fork, snapshot, Date.now(), false);
       if (action === "delete") {
         try {
           const descendants = await this.#bridge.listDescendantThreads(fork.threadId, cwd);
+          if (stale()) return;
           action = decideTemporaryForkMaintenance(
             fork,
             snapshot,
@@ -668,6 +692,7 @@ export class NavigatorController implements vscode.Disposable {
       }
       retained.push(fork);
     }
+    if (stale()) return;
     if (storageChanged) {
       await this.#commitSystem({ ...this.#document, temporaryForks: retained });
     }
@@ -677,6 +702,7 @@ export class NavigatorController implements vscode.Disposable {
   async #withBusy(action: () => Promise<void>): Promise<void> {
     if (this.#busy) return;
     this.#busy = true;
+    this.#generation += 1;
     this.#transientMessage = null;
     this.#emit();
     try {
@@ -693,13 +719,13 @@ export class NavigatorController implements vscode.Disposable {
 
   async #commitUser(document: LearningDocument): Promise<void> {
     this.#history.record(this.#document);
-    this.#document = cloneDocument(document);
+    this.#document = document;
     await this.#store.write(this.#document);
     this.#emit();
   }
 
   async #commitSystem(document: LearningDocument): Promise<void> {
-    this.#document = cloneDocument(document);
+    this.#document = document;
     await this.#store.write(this.#document);
     this.#emit();
   }

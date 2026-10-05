@@ -94,6 +94,7 @@ export interface CodexThreadSnapshot {
   readonly cwd: string | null;
   readonly sessionId: string | null;
   readonly forkedFromId: string | null;
+  readonly parentKnown?: boolean;
   readonly createdAt: number | null;
   readonly updatedAt: number | null;
   readonly turns: ReadonlyArray<CodexTurnSnapshot>;
@@ -107,6 +108,7 @@ export interface CodexListedThread {
   readonly cwd: string | null;
   readonly sessionId: string | null;
   readonly forkedFromId: string | null;
+  readonly parentKnown?: boolean;
   readonly createdAt: number | null;
   readonly updatedAt: number | null;
   readonly status: unknown;
@@ -126,6 +128,7 @@ export interface LaneLayout {
 }
 
 export interface NavigatorViewState {
+  readonly tableVersion?: number;
   readonly document: LearningDocument;
   readonly layout: LaneLayout;
   readonly selectedNodeId: string | null;
