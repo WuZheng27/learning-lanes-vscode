@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
-import { mapWithConcurrency, relatedThreads } from "./threadDiscovery.js";
+import { mapWithConcurrency } from "./threadDiscovery.js";
 import { AppServerClient } from "./appServerClient.js";
 import {
   bundledCodexRelativePath,
@@ -30,6 +30,7 @@ export interface CodexCompatibility {
 export class CodexBridge implements vscode.Disposable {
   readonly #extensionVersion: string;
   readonly #threadParentCache = new Map<string, Pick<CodexListedThread, "forkedFromId" | "parentKnown">>();
+  readonly #parentReads = new Map<string, Promise<Pick<CodexListedThread, "forkedFromId" | "parentKnown">>>();
   #rootCache: ReadonlyArray<CodexListedThread> = [];
 
   get cachedRootThreads(): ReadonlyArray<CodexListedThread> { return this.#rootCache; }
@@ -115,26 +116,85 @@ export class CodexBridge implements vscode.Disposable {
     });
   }
 
-  async #hydrateParents(threads: ReadonlyArray<CodexListedThread>, signal?: AbortSignal): Promise<ReadonlyArray<CodexListedThread>> {
+  async #readParent(threadId: string): Promise<Pick<CodexListedThread, "forkedFromId" | "parentKnown">> {
+    const cached = this.#threadParentCache.get(threadId);
+    if (cached) return cached;
+    const pending = this.#parentReads.get(threadId);
+    if (pending) return pending;
+    const read = this.#loadParent(threadId);
+    this.#parentReads.set(threadId, read);
+    try { return await read; }
+    finally { this.#parentReads.delete(threadId); }
+  }
+
+  async #loadParent(threadId: string): Promise<Pick<CodexListedThread, "forkedFromId" | "parentKnown">> {
+    const client = await this.#clientForRequest();
+    const snapshot = parseThreadSnapshot(await client.request<unknown>("thread/read", {
+      threadId,
+      includeTurns: false,
+    }));
+    const parent = { forkedFromId: snapshot.forkedFromId, parentKnown: snapshot.parentKnown ?? false };
+    if (parent.parentKnown) {
+      this.#threadParentCache.set(threadId, parent);
+      if (this.#threadParentCache.size > 10_000) {
+        this.#threadParentCache.delete(this.#threadParentCache.keys().next().value!);
+      }
+    }
+    return parent;
+  }
+
+  async #hydrateParents(
+    threads: ReadonlyArray<CodexListedThread>,
+    signal?: AbortSignal,
+    onThread?: (thread: CodexListedThread) => void,
+  ): Promise<ReadonlyArray<CodexListedThread>> {
     return mapWithConcurrency(threads, 6, async thread => {
-      if (thread.parentKnown || thread.forkedFromId) return thread;
-      const cached = this.#threadParentCache.get(thread.id);
-      if (cached) return { ...thread, ...cached };
-      try {
-        const client = await this.#clientForRequest();
-        const snapshot = parseThreadSnapshot(await client.request<unknown>("thread/read", { threadId: thread.id, includeTurns: false }));
-        const parent = { forkedFromId: snapshot.forkedFromId, parentKnown: snapshot.parentKnown ?? false };
-        if (parent.parentKnown) {
-          this.#threadParentCache.set(thread.id, parent);
-          if (this.#threadParentCache.size > 10_000) this.#threadParentCache.delete(this.#threadParentCache.keys().next().value!);
+      let hydrated = thread;
+      if (thread.forkedFromId) {
+        this.#threadParentCache.set(thread.id, { forkedFromId: thread.forkedFromId, parentKnown: true });
+      }
+      if (!thread.parentKnown && !thread.forkedFromId) {
+        try {
+          hydrated = { ...thread, ...await this.#readParent(thread.id) };
+        } catch {
+          // Unknown ancestry must retain full-history fallback during branch sync.
         }
-        return { ...thread, ...parent };
-      } catch { return thread; }
+      }
+      if (!signal?.aborted) onThread?.(hydrated);
+      return hydrated;
     }, signal);
   }
 
+  async resolveRootThread(threadId: string): Promise<string> {
+    return await this.#resolveVerifiedRoot(threadId) ?? threadId;
+  }
+
+  async #resolveVerifiedRoot(threadId: string): Promise<string | null> {
+    let current = threadId;
+    const seen = new Set<string>();
+    while (!seen.has(current)) {
+      seen.add(current);
+      const parent = await this.#readParent(current);
+      if (!parent.parentKnown) return null;
+      if (!parent.forkedFromId) return current;
+      current = parent.forkedFromId;
+    }
+    throw new Error("Codex 对话父关系出现循环，无法确认根对话。");
+  }
+
   async listRelatedThreads(rootId: string, cwd: string): Promise<ReadonlyArray<CodexListedThread>> {
-    return relatedThreads(rootId, await this.#hydrateParents(await this.listWorkspaceThreads(cwd)));
+    const threads = await this.#hydrateParents(await this.listWorkspaceThreads(cwd));
+    const roots = await mapWithConcurrency(threads, 6, async thread => {
+      if (!thread.parentKnown && !thread.forkedFromId) return null;
+      try {
+        // An active child can descend through archived or otherwise unlisted intermediates.
+        return await this.#resolveVerifiedRoot(thread.id);
+      } catch {
+        return null;
+      }
+    });
+    // Keep uncertain candidates for turn-prefix inference; exclude only confirmed unrelated trees.
+    return threads.filter((_thread, index) => roots[index] === rootId || roots[index] === null);
   }
 
   async listAllRootThreads(
@@ -142,16 +202,25 @@ export class CodexBridge implements vscode.Disposable {
     signal?: AbortSignal,
   ): Promise<ReadonlyArray<CodexListedThread>> {
     const roots = new Map<string, CodexListedThread>();
+    const publish = (): void => {
+      // Keep verified cached choices until their page is refreshed or the scan completes.
+      this.#rootCache = [...new Map([...this.#rootCache, ...roots.values()].map(thread => [thread.id, thread])).values()];
+      onUpdate?.([...roots.values()]);
+    };
     await this.#listThreads({
       sortKey: "updated_at", sortDirection: "desc", archived: false, sourceKinds: ["vscode"],
     }, async page => {
-      for (const thread of await this.#hydrateParents(page, signal)) {
-        if (thread.forkedFromId === null) roots.set(thread.id, thread);
-      }
-      this.#rootCache = [...new Map([...this.#rootCache, ...roots.values()].map(thread => [thread.id, thread])).values()];
-      onUpdate?.([...roots.values()]);
+      await this.#hydrateParents(page, signal, thread => {
+        if (thread.parentKnown && thread.forkedFromId === null) {
+          roots.set(thread.id, thread);
+          publish();
+        } else if (thread.forkedFromId) {
+          this.#rootCache = this.#rootCache.filter(cached => cached.id !== thread.id);
+        }
+      });
     }, signal);
     this.#rootCache = [...roots.values()];
+    onUpdate?.(this.#rootCache);
     return this.#rootCache;
   }
 

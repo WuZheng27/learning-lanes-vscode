@@ -1,5 +1,7 @@
 # Performance validation for 0.8.1
 
+The ancestry assumptions in this release caused a correctness regression and are superseded by [the 0.8.2 fix](ancestry-0.8.2.md). The rendering optimizations and their measurements remain applicable.
+
 Validated on Linux / Node 24 with official Codex extension 26.930.41038 and its bundled Codex 0.160.0. Automated tests also run in CI on Node 22. Original comparison commit: 3db9981c081e571dd2aa111cd9c712af5ff9cb43.
 
 ## Automated coverage

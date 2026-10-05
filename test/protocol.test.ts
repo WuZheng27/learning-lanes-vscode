@@ -8,6 +8,14 @@ import {
 } from "../src/protocol.js";
 
 describe("Codex protocol helpers", () => {
+  it("treats list nulls as unverified while retaining detailed read ancestry", () => {
+    const listed = parseThreadList({ data: [{ id: "branch", forkedFromId: null }] });
+    const snapshot = parseThreadSnapshot({ thread: { id: "branch", forkedFromId: "root" } });
+    expect(listed[0]).toMatchObject({ forkedFromId: null, parentKnown: false });
+    expect(snapshot).toMatchObject({ forkedFromId: "root", parentKnown: true });
+    expect(parseThreadSnapshot({ thread: { id: "root", forkedFromId: null } }).parentKnown).toBe(true);
+  });
+
   it("targets the official Codex sidebar URI handler", () => {
     expect(buildSidebarDeepLink("thread/id")).toBe(
       "vscode://openai.chatgpt/local/thread%2Fid",

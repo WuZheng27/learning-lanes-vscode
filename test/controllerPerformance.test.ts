@@ -15,7 +15,7 @@ const controllers:NavigatorController[]=[];
 afterEach(()=>{controllers.splice(0).forEach(c=>c.dispose());ui.focused=false;ui.pick.mockReset();});
 async function setup() {
  const snapshots=Object.fromEntries(["a","b"].map(id=>[id,parseThreadSnapshot({thread:{id,cwd:"/workspace",forkedFromId:null,updatedAt:1,createdAt:1,turns:[{id:`turn-${id}`,status:"completed",items:[]}]}})]));
- const bridge={checkCompatibility:vi.fn(async()=>({extensionVersion:"test",appServerVersion:"test"})),
+ const bridge={resolveRootThread:vi.fn(async (id:string)=>id),checkCompatibility:vi.fn(async()=>({extensionVersion:"test",appServerVersion:"test"})),
   readThread:vi.fn(async(id:string)=>snapshots[id]!),listRelatedThreads:vi.fn(async(id:string)=>parseThreadList({data:[snapshots[id]]})),
   cachedRootThreads:[],openSidebarThread:vi.fn(async()=>{}),dispose:vi.fn()};
  const store={read:vi.fn(async()=>({...defaultDocument("test"),rootThreadId:"a"})),write:vi.fn(async()=>{})};
@@ -23,6 +23,15 @@ async function setup() {
  controllers.push(controller); return {controller,bridge,store,snapshots};
 }
 describe("controller performance and switching",()=>{
+ it("repairs a descendant root saved by 0.8.1 while retaining navigator metadata",async()=>{
+  const {controller,bridge,store}=await setup();
+  bridge.resolveRootThread.mockResolvedValue("b");
+  await controller.sync();
+  expect(controller.getState().document.rootThreadId).toBe("b");
+  expect(controller.getState().document.nodes.map(node=>node.id)).toEqual(["turn-b"]);
+  expect(store.write.mock.calls.length).toBeGreaterThan(0);
+ });
+
  it("reuses snapshots and layout on unchanged sync and node selection",async()=>{
   const {controller,bridge}=await setup();await controller.sync();const state=controller.getState();
   await controller.sync(); expect(bridge.readThread).toHaveBeenCalledTimes(1);
@@ -41,7 +50,7 @@ describe("controller performance and switching",()=>{
   const {controller,bridge,snapshots}=await setup();
   let release:(v:NonNullable<typeof snapshots.a>)=>void=()=>{};
   bridge.readThread.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
-  ui.focused=true;controller.setNavigatorVisible(true);await Promise.resolve();
+  ui.focused=true;controller.setNavigatorVisible(true);await vi.waitFor(()=>expect(bridge.readThread).toHaveBeenCalledTimes(1));
   ui.pick.mockResolvedValueOnce({thread:snapshots.b});await controller.selectRoot();
   release(snapshots.a!);await new Promise(resolve=>setTimeout(resolve,0));
   expect(controller.getState().document.rootThreadId).toBe("b");

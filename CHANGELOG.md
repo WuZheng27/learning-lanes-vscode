@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2
+
+- Fix the 0.8.1 regression where null parent IDs in thread/list hid real branches and exposed descendants as roots.
+- Verify null list metadata through cached thread/read summaries, and publish roots only after verification.
+- Follow parent chains through threads omitted from the active list; retain uncertain candidates for turn-prefix inference.
+- Restore prefix inference when the explicit parent is missing from the listed set.
+- Automatically repair navigator documents that selected a descendant as their root in 0.8.1.
+- Add anonymized real-history replay tests, including omitted intermediate parents and exact turn-tree edges.
+
 ## 0.8.1
 
 - Show cached root choices immediately and progressively fill the picker; cancel unused discovery work.

@@ -186,7 +186,7 @@ export class NavigatorController implements vscode.Disposable {
       this.#generation += 1;
       await this.#syncOfficialTasks();
       this.#selectedNodeId = this.#document.nodes.find((node) => node.parentNodeId === null)?.id ?? null;
-      await this.#bridge.openSidebarThread(selected.thread.id);
+      await this.#bridge.openSidebarThread(this.#document.rootThreadId ?? selected.thread.id);
       this.#activeTemporaryThreadId = null;
       if (previouslyActive && previouslyActive !== selected.thread.id) {
         await this.#scheduleTemporaryFork(previouslyActive);
@@ -518,9 +518,18 @@ export class NavigatorController implements vscode.Disposable {
   }
 
   async #runSync(generation: number): Promise<void> {
-    const rootThreadId = this.#document.rootThreadId;
+    let rootThreadId = this.#document.rootThreadId;
     if (!rootThreadId) return;
     const stale = (): boolean => this.#disposed || generation !== this.#generation || rootThreadId !== this.#document.rootThreadId;
+    // 0.8.1 could persist a descendant as the root when list metadata lost its parent.
+    const actualRootId = await this.#bridge.resolveRootThread(rootThreadId);
+    if (stale()) return;
+    if (actualRootId !== rootThreadId) {
+      rootThreadId = actualRootId;
+      await this.#commitSystem({ ...this.#document, rootThreadId });
+      if (stale()) return;
+      this.#setMessage("已恢复到该分支所属的根对话，正在重新合并完整分支树。", false);
+    }
     let rootSnapshot = this.#snapshotCache.get(rootThreadId);
     if (!rootSnapshot) {
       rootSnapshot = await this.#bridge.readThread(rootThreadId);

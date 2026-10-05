@@ -7,12 +7,12 @@ describe("bounded discovery", () => {
     const threads = parseThreadList({ data: [
       {id:"grandchild", forkedFromId:"branch"}, {id:"other", forkedFromId:null},
       {id:"branch", forkedFromId:"root"}, {id:"root", forkedFromId:null},
-    ]});
+    ]}).map(thread => ({ ...thread, parentKnown: true }));
     expect(relatedThreads("root", threads).map(t=>t.id)).toEqual(["grandchild","branch","root"]);
   });
   it("retains the legacy prefix fallback when parent metadata is missing", () => {
     const threads = parseThreadList({data:[{id:"root",forkedFromId:null},{id:"legacy"}]});
-    expect(threads[0]?.parentKnown).toBe(true);
+    expect(threads[0]?.parentKnown).toBe(false);
     expect(threads[1]?.parentKnown).toBe(false);
     expect(relatedThreads("root",threads)).toBe(threads);
   });

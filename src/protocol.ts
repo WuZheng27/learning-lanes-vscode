@@ -84,7 +84,8 @@ export function parseThreadListPage(value: unknown): {
         cwd: typeof thread.cwd === "string" ? thread.cwd : null,
         sessionId: typeof thread.sessionId === "string" ? thread.sessionId : null,
         forkedFromId: typeof thread.forkedFromId === "string" ? thread.forkedFromId : null,
-    parentKnown: thread.forkedFromId === null || typeof thread.forkedFromId === "string",
+        // thread/list may emit null even for a real fork. Only a non-null ID is evidence.
+        parentKnown: typeof thread.forkedFromId === "string",
         createdAt: finiteNumber(thread.createdAt),
         updatedAt: finiteNumber(thread.updatedAt),
         status: thread.status,

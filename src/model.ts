@@ -675,7 +675,6 @@ export function inferTaskParentIds(
       result.set(child.id, explicitParent);
       continue;
     }
-    if (child.parentKnown || childSnapshot?.parentKnown) continue;
     if (!childSnapshot || childSnapshot.turns.length === 0) continue;
     let best:
       | { readonly thread: CodexListedThread; readonly commonTurns: number }
