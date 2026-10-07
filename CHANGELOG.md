@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.4
+
+- Close App Server input and drain output for graceful shutdown before using SIGTERM and, if needed, SIGKILL on the owned child process.
+- Confirm process exit before completing handoff; share shutdown across concurrent disposal calls and retain failed cleanup for retry.
+- Wait for a previous client release before starting a replacement or opening its fork in the official sidebar.
+- Prevent requests that outlive bridge disposal from spawning a new App Server.
+- Add real child-process regressions for delayed EOF exit, output flushing, ignored signals, pending requests, concurrent shutdown, and handoff recovery.
+
 ## 0.8.3
 
 - Fetch 25 records for the first root-picker page, then resume bulk pagination without dropping later roots or branches.

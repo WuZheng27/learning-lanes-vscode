@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const rpc = vi.hoisted(() => vi.fn());
-vi.mock("vscode", () => ({}));
+const shutdown = vi.hoisted(() => vi.fn(async () => {}));
+const start = vi.hoisted(() => vi.fn(async () => {}));
+const ui = vi.hoisted(() => ({ execute: vi.fn(async () => {}), open: vi.fn(async () => true) }));
+vi.mock("vscode", () => ({ commands: { executeCommand: ui.execute }, env: { openExternal: ui.open }, Uri: { parse: (uri: string) => uri } }));
 vi.mock("../src/appServerClient.js", () => ({ AppServerClient: class {
-  start = vi.fn(async () => {}); request = rpc; dispose = vi.fn();
+  start = start; request = rpc; shutdown = shutdown; dispose = vi.fn();
 } }));
 import { CodexBridge } from "../src/codexBridge.js";
 function bridge() {
@@ -10,9 +13,69 @@ function bridge() {
   vi.spyOn(client, "checkCompatibility").mockResolvedValue({ extensionVersion: "test", appServerVersion: "test", executable: "mock", sidebarViewId: "mock" });
   return client;
 }
-beforeEach(() => { rpc.mockReset(); });
+beforeEach(() => { rpc.mockReset(); start.mockReset().mockResolvedValue(undefined); shutdown.mockReset().mockResolvedValue(undefined); ui.execute.mockClear(); ui.open.mockClear(); });
 
 describe("verified parent discovery", () => {
+  it("preserves a startup failure while cleanup blocks a replacement process", async () => {
+    start.mockRejectedValueOnce(new Error("initialize failed"));
+    let finish: () => void = () => {};
+    shutdown.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    rpc.mockImplementation(async (_method, params) => ({ thread: { id: params.threadId, turns: [] } }));
+    const client = bridge();
+    await expect(client.readThread("root")).rejects.toThrow("initialize failed");
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    const retry = client.readThread("root");
+    await Promise.resolve();
+    expect(start).toHaveBeenCalledTimes(1);
+    finish();
+    await retry;
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+  it("waits for fork handoff before new reads or official sidebar navigation", async () => {
+    rpc.mockImplementation(async (method, params) => method === "thread/fork"
+      ? { thread: { id: "forked" } }
+      : method === "thread/read" ? { thread: { id: params.threadId, turns: [] } } : {});
+    let finish: () => void = () => {};
+    shutdown.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const client = bridge();
+    const fork = client.forkThread("root", "turn-1");
+    await vi.waitFor(() => expect(shutdown).toHaveBeenCalled());
+    const read = client.readThread("root");
+    const open = client.openSidebarThread("forked");
+    await Promise.resolve();
+    expect(rpc.mock.calls.some(call => call[0] === "thread/read")).toBe(false);
+    expect(ui.execute).not.toHaveBeenCalled();
+    finish();
+    expect(await fork).toEqual({ threadId: "forked" });
+    await Promise.all([read, open]);
+    expect(ui.execute).toHaveBeenCalled();
+  });
+
+  it("retries failed process release before starting a replacement client", async () => {
+    rpc.mockImplementation(async (method, params) => method === "thread/fork"
+      ? { thread: { id: "forked" } }
+      : method === "thread/read" ? { thread: { id: params.threadId, turns: [] } } : {});
+    shutdown.mockRejectedValueOnce(new Error("process still alive"));
+    const client = bridge();
+    await expect(client.forkThread("root", "turn-1")).rejects.toThrow("process still alive");
+    await client.readThread("root");
+    expect(shutdown).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not spawn a replacement for requests still waiting when the bridge is disposed", async () => {
+    rpc.mockImplementation(async (method) => method === "thread/fork" ? { thread: { id: "forked" } } : {});
+    let finish: () => void = () => {};
+    shutdown.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const client = bridge();
+    const fork = client.forkThread("root", "turn-1");
+    await vi.waitFor(() => expect(shutdown).toHaveBeenCalled());
+    const read = client.readThread("root");
+    const rejected = expect(read).rejects.toThrow(/disposed/u);
+    client.dispose();
+    finish();
+    await Promise.all([fork, rejected]);
+    expect(rpc.mock.calls.some(call => call[0] === "thread/read")).toBe(false);
+  });
   it("verifies list nulls before publishing roots and streams verified choices", async () => {
     rpc.mockImplementation(async (method, params) => {
       if (method === "thread/read") return { thread: { id: params.threadId, forkedFromId: null } };

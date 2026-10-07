@@ -35,6 +35,8 @@ export class CodexBridge implements vscode.Disposable {
 
   get cachedRootThreads(): ReadonlyArray<CodexListedThread> { return this.#rootCache; }
   #client: AppServerClient | null = null;
+  #releasingClient: { client: AppServerClient; promise: Promise<void> } | null = null;
+  #disposed = false;
   #compatibility: CodexCompatibility | null = null;
 
   constructor(extensionVersion: string) {
@@ -282,6 +284,8 @@ export class CodexBridge implements vscode.Disposable {
 
   async openSidebarThread(threadId: string): Promise<void> {
     await this.checkCompatibility();
+    await this.#waitForClientRelease();
+    if (this.#disposed) throw new Error("Codex bridge is disposed.");
     await vscode.commands.executeCommand("chatgpt.openSidebar");
     const deepLink = vscode.Uri.parse(buildSidebarDeepLink(threadId));
     const opened = await vscode.env.openExternal(deepLink);
@@ -320,7 +324,10 @@ export class CodexBridge implements vscode.Disposable {
   }
 
   async #clientForRequest(): Promise<AppServerClient> {
+    if (this.#disposed) throw new Error("Codex bridge is disposed.");
     const compatibility = await this.checkCompatibility();
+    await this.#waitForClientRelease();
+    if (this.#disposed) throw new Error("Codex bridge is disposed.");
     if (!this.#client) {
       this.#client = new AppServerClient(
         compatibility.executable,
@@ -333,18 +340,37 @@ export class CodexBridge implements vscode.Disposable {
       return client;
     } catch (error) {
       if (this.#client === client) this.#client = null;
-      client.dispose();
+      void this.#releaseClient(client).catch(() => {
+        // Preserve the startup error; a later request retries the remembered cleanup.
+      });
       throw error;
     }
   }
 
-  async #releaseClient(client: AppServerClient): Promise<void> {
+  async #waitForClientRelease(): Promise<void> {
+    const release = this.#releasingClient;
+    if (!release) return;
+    try {
+      await release.promise;
+    } catch {
+      if (this.#releasingClient === release) await this.#releaseClient(release.client, true);
+      else if (this.#releasingClient) await this.#releasingClient.promise;
+    }
+  }
+
+  async #releaseClient(client: AppServerClient, retry = false): Promise<void> {
+    if (!retry && this.#releasingClient?.client === client) return this.#releasingClient.promise;
     if (this.#client === client) this.#client = null;
-    await client.shutdown();
+    const release = { client, promise: client.shutdown() };
+    this.#releasingClient = release;
+    await release.promise;
+    if (this.#releasingClient === release) this.#releasingClient = null;
   }
 
   dispose(): void {
+    this.#disposed = true;
     this.#client?.dispose();
+    this.#releasingClient?.client.dispose();
     this.#client = null;
   }
 }

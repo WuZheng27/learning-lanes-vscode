@@ -28,6 +28,7 @@ export class AppServerClient {
   #nextId = 1;
   #pending = new Map<string, PendingRequest>();
   #startPromise: Promise<void> | null = null;
+  #shutdownPromise: Promise<void> | null = null;
   #stderrTail = "";
   #disposed = false;
 
@@ -61,12 +62,19 @@ export class AppServerClient {
     child.stderr.on("data", (chunk: string) => {
       this.#stderrTail = `${this.#stderrTail}${chunk}`.slice(-8_000);
     });
-    child.once("error", (error) => this.#handleExit(error));
+    child.on("error", (error) => {
+      if (child.pid === undefined) this.#handleExit(error, child);
+      else this.#rejectPending(error);
+    });
+    child.stdin.on("error", (error) => {
+      if (!this.#disposed) this.#rejectPending(error);
+    });
     child.once("exit", (code, signal) => {
       const detail = this.#stderrTail.trim();
       const suffix = detail ? ` ${detail}` : "";
       this.#handleExit(
         new Error(`Codex App Server exited (code=${String(code)}, signal=${String(signal)}).${suffix}`),
+        child,
       );
     });
 
@@ -124,11 +132,15 @@ export class AppServerClient {
 
   #send(message: Readonly<Record<string, unknown>>): void {
     const child = this.#child;
-    if (!child || child.stdin.destroyed) throw new Error("Codex App Server is not running.");
+    if (!child || child.stdin.destroyed || child.stdin.writableEnded) {
+      throw new Error("Codex App Server is not running.");
+    }
     child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   #handleLine(line: string): void {
+    // Keep draining stdout during shutdown, without writing to the closed input pipe.
+    if (this.#disposed) return;
     if (!line.trim()) return;
     let message: AppServerMessage;
     try {
@@ -160,11 +172,15 @@ export class AppServerClient {
     pending.resolve(message.result);
   }
 
-  #handleExit(error: Error): void {
-    if (!this.#child) return;
+  #handleExit(error: Error, child: ChildProcessWithoutNullStreams): void {
+    if (this.#child !== child) return;
     this.#reader?.close();
     this.#reader = null;
     this.#child = null;
+    this.#rejectPending(error);
+  }
+
+  #rejectPending(error: Error): void {
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -172,37 +188,45 @@ export class AppServerClient {
     this.#pending.clear();
   }
 
-  async shutdown(timeoutMs = 3_000): Promise<void> {
+  shutdown(timeoutMs = 3_000, signalTimeoutMs = 2_000): Promise<void> {
     this.#disposed = true;
+    if (this.#shutdownPromise) return this.#shutdownPromise;
+    const promise = this.#shutdown(timeoutMs, signalTimeoutMs);
+    this.#shutdownPromise = promise;
+    void promise.catch(() => {
+      // Retain the process reference and permit cleanup to be retried if it never exits.
+      if (this.#shutdownPromise === promise) this.#shutdownPromise = null;
+    });
+    return promise;
+  }
+
+  async #shutdown(timeoutMs: number, signalTimeoutMs: number): Promise<void> {
     const child = this.#child;
-    this.#child = null;
-    this.#reader?.close();
-    this.#reader = null;
-    for (const pending of this.#pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("Codex App Server client was shut down."));
-    }
-    this.#pending.clear();
-
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-
-    await new Promise<void>((resolve, reject) => {
+    this.#rejectPending(new Error("Codex App Server client was shut down."));
+    if (!child) return;
+    const exited = (): boolean => child.exitCode !== null || child.signalCode !== null || child.pid === undefined;
+    const waitForExit = (waitMs: number): Promise<boolean> => new Promise((resolve) => {
+      if (exited()) { resolve(true); return; }
       let settled = false;
-      const finish = (error?: Error): void => {
+      const finish = (didExit: boolean): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         child.removeListener("exit", onExit);
-        if (error) reject(error);
-        else resolve();
+        resolve(didExit);
       };
-      const onExit = (): void => finish();
-      const timer = setTimeout(() => {
-        finish(new Error(`Codex App Server did not exit within ${timeoutMs}ms.`));
-      }, timeoutMs);
+      const onExit = (): void => finish(true);
+      const timer = setTimeout(() => finish(exited()), waitMs);
       child.once("exit", onExit);
-      if (!child.killed) child.kill();
     });
+    if (!exited() && !child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+    if (await waitForExit(timeoutMs)) return;
+    child.kill("SIGTERM");
+    if (await waitForExit(signalTimeoutMs)) return;
+    // child.killed only means a signal was sent, so it must not suppress escalation.
+    child.kill("SIGKILL");
+    if (await waitForExit(signalTimeoutMs)) return;
+    throw new Error("Codex App Server 未能退出，已尝试关闭输入及终止进程；为避免对话交接冲突，本次操作已停止。");
   }
 
   dispose(): void {
