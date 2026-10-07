@@ -308,7 +308,7 @@ Release VSIX files should be attached to GitHub Releases instead of committed to
 
 ## Project status
 
-Version 0.8.2 is an experimental MVP. The storage schema is versioned and migrates earlier local
+Version 0.8.4 is an experimental MVP. The storage schema is versioned and migrates earlier local
 documents, but the integration should still be treated as compatibility-sensitive software.
 Issues and reproducible compatibility reports are welcome.
 
@@ -323,3 +323,15 @@ Root selection opens with cached, verified choices and updates progressively. A 
 Full reads use six workers, snapshots are retained across root switches, and stale sync results are discarded. The cache retains the active working set with a 128-thread total target; very large active trees can exceed that target. Selection and status updates preserve the existing table. Shared background columns and one-pass activity aggregation reduce large-table rendering work.
 
 See [0.8.2 ancestry validation](docs/ancestry-0.8.2.md) and [rendering performance measurements](docs/performance-0.8.1.md).
+
+## Root selection and state updates (0.8.3)
+
+The first root-picker page requests 25 records before continuing bulk pagination. Cached verified choices remain visible while the complete scan refreshes. Root navigation opens the official sidebar before waiting for full lane synchronization. Selection, preview, and status changes send metadata updates when the table is unchanged, with full-state recovery when the Webview needs it.
+
+See [0.8.3 validation and measurements](docs/performance-0.8.3.md).
+
+## Interior-node handoff (0.8.4)
+
+Opening an interior node can create a temporary fork ending at that turn. The navigator closes its own App Server before handing the fork to official Codex. Shutdown now closes input and keeps draining output, then uses SIGTERM and SIGKILL if necessary. Concurrent cleanup calls share the same result, and replacement clients and sidebar navigation wait for confirmed process exit.
+
+See [0.8.4 shutdown validation](docs/shutdown-0.8.4.md). After updating the extension, run **Developer: Reload Window**.
