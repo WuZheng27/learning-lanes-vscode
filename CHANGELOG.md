@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3
+
+- Fetch 25 records for the first root-picker page, then resume bulk pagination without dropping later roots or branches.
+- Keep verified cached root choices visible while later pages refresh; report incomplete scans rather than accepting truncated results.
+- Open the normalized official root before waiting for the complete lane tree to synchronize.
+- Send selection, preview, and status updates without retransmitting unchanged tables; recover full state on Webview initialization or version mismatch.
+- Exercise misleading parent metadata and omitted ancestors across page boundaries, plus early navigation and incremental Webview recovery.
+
 ## 0.8.2
 
 - Fix the 0.8.1 regression where null parent IDs in thread/list hid real branches and exposed descendants as roots.

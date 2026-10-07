@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { NavigatorController } from "./controller.js";
 import type { NavigatorViewState } from "./types.js";
+import { buildStateMessage } from "./viewStateMessages.js";
 
 interface WebviewMessage {
   readonly type?: unknown;
@@ -21,6 +22,8 @@ export class NavigatorPanel implements vscode.Disposable {
   readonly #panel: vscode.WebviewPanel;
   readonly #controller: NavigatorController;
   readonly #disposables: vscode.Disposable[] = [];
+  #lastPostedTableVersion: number | null = null;
+  #postSequence = 0;
 
   private constructor(panel: vscode.WebviewPanel, controller: NavigatorController) {
     this.#panel = panel;
@@ -30,19 +33,19 @@ export class NavigatorPanel implements vscode.Disposable {
       panel.onDidDispose(() => this.dispose()),
       panel.onDidChangeViewState(() => {
         this.#controller.setNavigatorVisible(panel.visible);
-        if (panel.visible) this.#postState(this.#controller.getState());
+        if (panel.visible) this.#postState(this.#controller.getState(), true);
       }),
       panel.webview.onDidReceiveMessage((message) => void this.#handleMessage(message)),
       controller.onDidChangeState((state) => this.#postState(state)),
     );
     this.#controller.setNavigatorVisible(panel.visible);
-    this.#postState(controller.getState());
+    this.#postState(controller.getState(), true);
   }
 
   static createOrShow(controller: NavigatorController): NavigatorPanel {
     if (NavigatorPanel.#current) {
       NavigatorPanel.#current.#panel.reveal(vscode.ViewColumn.Active, false);
-      NavigatorPanel.#current.#postState(controller.getState());
+      NavigatorPanel.#current.#postState(controller.getState(), true);
       return NavigatorPanel.#current;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -60,7 +63,7 @@ export class NavigatorPanel implements vscode.Disposable {
     const message = raw as WebviewMessage;
     switch (message.type) {
       case "ready":
-        this.#postState(this.#controller.getState());
+        this.#postState(this.#controller.getState(), true);
         break;
       case "selectRoot":
         await this.#controller.selectRoot();
@@ -137,8 +140,15 @@ export class NavigatorPanel implements vscode.Disposable {
     }
   }
 
-  #postState(state: NavigatorViewState): void {
-    void this.#panel.webview.postMessage({ type: "state", state });
+  #postState(state: NavigatorViewState, forceFull = false): void {
+    const message = buildStateMessage(state, this.#lastPostedTableVersion, forceFull);
+    const sequence = ++this.#postSequence;
+    this.#lastPostedTableVersion = state.tableVersion ?? null;
+    void this.#panel.webview.postMessage(message).then(delivered => {
+      if (!delivered && sequence === this.#postSequence) this.#lastPostedTableVersion = null;
+    }, () => {
+      if (sequence === this.#postSequence) this.#lastPostedTableVersion = null;
+    });
   }
 
   dispose(): void {
@@ -317,9 +327,15 @@ function webviewHtml(webview: vscode.Webview): string {
     const labels = { waiting: '等待提问', running: '运行中', completed: '已完成', failed: '失败', interrupted: '已中断' };
 
     window.addEventListener('message', event => {
-      if (event.data?.type !== 'state') return;
+      const message = event.data;
+      if (message?.type !== 'state' && message?.type !== 'stateUpdate') return;
       const previousNodeId = current?.selectedNodeId || null;
-      current = event.data.state;
+      if (message.type === 'stateUpdate') {
+        if (!current || current.tableVersion === undefined || message.state.tableVersion !== current.tableVersion) {
+          post('ready'); return;
+        }
+        current = { ...current, ...message.state, document: { ...current.document, ...message.state.document } };
+      } else current = message.state;
       if (current.selectedNodeId !== previousNodeId) dismissedPreviewNodeId = null;
       render();
     });

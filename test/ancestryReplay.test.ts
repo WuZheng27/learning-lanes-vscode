@@ -26,9 +26,11 @@ describe("anonymized real-history structure replay", () => {
     it(`recovers root grouping and every node edge in history ${index + 1}`, async () => {
       rpc.mockImplementation(async (method, params) => {
         if (method === "thread/list") {
-          return { data: fixture.threads.map(thread => ({
+          const offset = Number(params.cursor ?? 0);
+          const pageSize = Math.min(5, params.limit);
+          return { data: fixture.threads.slice(offset, offset + pageSize).map(thread => ({
             id: thread.id, forkedFromId: null, createdAt: thread.createdAt, updatedAt: thread.updatedAt,
-          })) };
+          })), nextCursor: offset + pageSize < fixture.threads.length ? String(offset + pageSize) : null };
         }
         const thread = fixture.threads.find(thread => thread.id === params.threadId);
         if (!thread) {

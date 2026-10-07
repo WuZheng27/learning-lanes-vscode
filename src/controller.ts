@@ -169,28 +169,30 @@ export class NavigatorController implements vscode.Disposable {
         this.#document.rootThreadId, this.#workspaceFolder.uri.fsPath, temporaryThreadIds,
       );
       if (!selected) return;
+      const rootThreadId = await this.#bridge.resolveRootThread(selected.thread.id);
       const previouslyActive = this.#activeTemporaryThreadId;
+      this.#selectedNodeId = null;
       await this.#commitUser({
         ...this.#document,
-        rootThreadId: selected.thread.id,
+        rootThreadId,
         hiddenTurnIds: [],
         frozenRootNodeIds: [],
         temporaryForks: this.#document.temporaryForks.filter(
-          (fork) => fork.threadId !== selected.thread.id,
+          (fork) => fork.threadId !== rootThreadId,
         ),
         nodeActivity: {},
         nodeLabels: {},
         nodes: [],
       });
-      this.#selectedNodeId = null;
       this.#generation += 1;
-      await this.#syncOfficialTasks();
-      this.#selectedNodeId = this.#document.nodes.find((node) => node.parentNodeId === null)?.id ?? null;
-      await this.#bridge.openSidebarThread(this.#document.rootThreadId ?? selected.thread.id);
+      await this.#bridge.openSidebarThread(rootThreadId);
       this.#activeTemporaryThreadId = null;
-      if (previouslyActive && previouslyActive !== selected.thread.id) {
+      if (previouslyActive && previouslyActive !== rootThreadId) {
         await this.#scheduleTemporaryFork(previouslyActive);
       }
+      this.#setMessage("已打开根对话，正在加载完整分支树。", false);
+      await this.#syncOfficialTasks();
+      this.#selectedNodeId = this.#document.nodes.find((node) => node.parentNodeId === null)?.id ?? null;
       this.#setMessage("已按问题逐层绑定。以后请用官方 Codex 的分支按钮创建分支。", false);
     });
   }

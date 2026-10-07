@@ -205,7 +205,7 @@ export class CodexBridge implements vscode.Disposable {
     const publish = (): void => {
       // Keep verified cached choices until their page is refreshed or the scan completes.
       this.#rootCache = [...new Map([...this.#rootCache, ...roots.values()].map(thread => [thread.id, thread])).values()];
-      onUpdate?.([...roots.values()]);
+      onUpdate?.(this.#rootCache);
     };
     await this.#listThreads({
       sortKey: "updated_at", sortDirection: "desc", archived: false, sourceKinds: ["vscode"],
@@ -218,7 +218,7 @@ export class CodexBridge implements vscode.Disposable {
           this.#rootCache = this.#rootCache.filter(cached => cached.id !== thread.id);
         }
       });
-    }, signal);
+    }, signal, 25);
     this.#rootCache = [...roots.values()];
     onUpdate?.(this.#rootCache);
     return this.#rootCache;
@@ -292,27 +292,31 @@ export class CodexBridge implements vscode.Disposable {
     parameters: Readonly<Record<string, unknown>>,
     onPage?: (page: ReadonlyArray<CodexListedThread>) => Promise<void>,
     signal?: AbortSignal,
+    firstPageLimit = 200,
   ): Promise<ReadonlyArray<CodexListedThread>> {
     const client = await this.#clientForRequest();
     const threads = new Map<string, CodexListedThread>();
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
-    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    for (let pageNumber = 0; pageNumber < 1_000; pageNumber += 1) {
       signal?.throwIfAborted();
       const result = await client.request<unknown>("thread/list", {
         ...parameters,
-        limit: 200,
+        limit: pageNumber === 0 ? firstPageLimit : 200,
         cursor,
       });
       const page = parseThreadListPage(result);
       signal?.throwIfAborted();
       for (const thread of page.data) threads.set(thread.id, thread);
       await onPage?.(page.data);
-      if (!page.nextCursor || seenCursors.has(page.nextCursor)) break;
+      if (!page.nextCursor) return [...threads.values()];
+      if (seenCursors.has(page.nextCursor)) {
+        throw new Error("Codex 对话列表游标重复，未完成扫描；请重新同步。");
+      }
       seenCursors.add(page.nextCursor);
       cursor = page.nextCursor;
     }
-    return [...threads.values()];
+    throw new Error("Codex 对话列表超过扫描页数上限，未完成扫描；请重新同步。");
   }
 
   async #clientForRequest(): Promise<AppServerClient> {

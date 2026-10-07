@@ -26,6 +26,57 @@ describe("verified parent discovery", () => {
     expect(update.mock.lastCall![0].map((thread: { id: string }) => thread.id)).toEqual(["first", "second"]);
     expect(client.cachedRootThreads).toHaveLength(2);
     expect(rpc.mock.calls.filter(call => call[0] === "thread/read")).toHaveLength(2);
+    expect(rpc.mock.calls.filter(call => call[0] === "thread/list").map(call => call[1].limit)).toEqual([25, 200]);
+  });
+
+  it("reads beyond 100 pages instead of silently losing older roots", async () => {
+    rpc.mockImplementation(async (method, params) => {
+      if (method === "thread/read") return { thread: { id: params.threadId, forkedFromId: null } };
+      const page = Number(params.cursor ?? 0);
+      return { data: [{ id: `root-${page}`, forkedFromId: null }], nextCursor: page < 100 ? String(page + 1) : null };
+    });
+    const roots = await bridge().listAllRootThreads();
+    expect(roots).toHaveLength(101);
+    expect(roots.at(-1)?.id).toBe("root-100");
+  });
+
+  it("continues past an empty page that has a next cursor", async () => {
+    rpc.mockImplementation(async (method, params) => {
+      if (method === "thread/read") return { thread: { id: params.threadId, forkedFromId: null } };
+      return params.cursor ? { data: [{ id: "older-root", forkedFromId: null }] } : { data: [], nextCursor: "older" };
+    });
+    expect((await bridge().listAllRootThreads()).map(thread => thread.id)).toEqual(["older-root"]);
+  });
+
+  it("reports repeated cursors instead of returning a partial branch set", async () => {
+    rpc.mockResolvedValue({ data: [{ id: "partial" }], nextCursor: "repeated" });
+    await expect(bridge().listRelatedThreads("root", "/workspace")).rejects.toThrow("未完成扫描");
+    expect(rpc.mock.calls.filter(call => call[0] === "thread/list")).toHaveLength(2);
+  });
+
+  it("reports the scan limit instead of treating truncated results as complete", async () => {
+    let page = 0;
+    rpc.mockImplementation(async () => ({ data: [], nextCursor: String(++page) }));
+    await expect(bridge().listWorkspaceThreads("/workspace")).rejects.toThrow("页数上限");
+  });
+
+  it("keeps cached choices while later pages load and removes absent roots on completion", async () => {
+    rpc.mockImplementation(async (method, params) => method === "thread/read"
+      ? { thread: { id: params.threadId, forkedFromId: null } }
+      : { data: [{ id: "first", forkedFromId: null }, { id: "second", forkedFromId: null }] });
+    const client = bridge();
+    await client.listAllRootThreads();
+    let finishPage: (value: unknown) => void = () => {};
+    rpc.mockImplementation(async (_method, params) => params.cursor
+      ? new Promise(resolve => { finishPage = resolve; })
+      : { data: [{ id: "first", forkedFromId: null }], nextCursor: "later" });
+    const update = vi.fn();
+    const pending = client.listAllRootThreads(update);
+    await vi.waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0]![0].map((thread: { id: string }) => thread.id)).toEqual(["first", "second"]);
+    finishPage({ data: [] });
+    expect((await pending).map(thread => thread.id)).toEqual(["first"]);
+    expect(client.cachedRootThreads.map(thread => thread.id)).toEqual(["first"]);
   });
 
   it("recovers branches when every list parent is null, caches verification, and filters unrelated roots", async () => {

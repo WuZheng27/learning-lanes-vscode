@@ -23,6 +23,22 @@ async function setup() {
  controllers.push(controller); return {controller,bridge,store,snapshots};
 }
 describe("controller performance and switching",()=>{
+ it("opens the normalized official root before waiting for complete branch discovery",async()=>{
+  const {controller,bridge,snapshots}=await setup();
+  bridge.resolveRootThread.mockResolvedValue("b");
+  ui.pick.mockResolvedValueOnce({thread:snapshots.a});
+  let finish:(value:ReturnType<typeof parseThreadList>)=>void=()=>{};
+  bridge.listRelatedThreads.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+  const pending=controller.selectRoot();
+  await vi.waitFor(()=>expect(bridge.listRelatedThreads).toHaveBeenCalled());
+  expect(bridge.openSidebarThread).toHaveBeenCalledWith("b");
+  expect(controller.getState().document.rootThreadId).toBe("b");
+  expect(controller.getState().busy).toBe(true);
+  finish(parseThreadList({data:[snapshots.b]}));
+  await pending;
+  expect(controller.getState().document.nodes.map(node=>node.id)).toEqual(["turn-b"]);
+  expect(controller.getState().busy).toBe(false);
+ });
  it("repairs a descendant root saved by 0.8.1 while retaining navigator metadata",async()=>{
   const {controller,bridge,store}=await setup();
   bridge.resolveRootThread.mockResolvedValue("b");

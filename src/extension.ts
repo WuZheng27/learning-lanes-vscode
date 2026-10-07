@@ -56,7 +56,7 @@ async function createController(context: vscode.ExtensionContext): Promise<Navig
   if (!workspaceFolder) {
     throw new Error("Learning Navigator 需要先打开一个 VS Code 工作区文件夹。");
   }
-  const bridge = new CodexBridge(String(context.extension.packageJSON.version ?? "0.8.2"));
+  const bridge = new CodexBridge(String(context.extension.packageJSON.version ?? "0.8.3"));
   const store = new LearningStore(context, workspaceFolder.uri.toString());
   return NavigatorController.create(bridge, store, workspaceFolder);
 }
